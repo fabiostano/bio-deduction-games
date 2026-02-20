@@ -42,6 +42,8 @@ python -m bio_deduction_game
   - CH5/6 = Player3 EKG/EDA
   - CH7/8 = Player4 EKG/EDA
 
+The app no longer hard-depends on `biosignalsplux` via pip because some environments do not provide a public wheel on PyPI. Install your OpenSignals/BioPlux Python package manually (vendor wheel/SDK) on the target machine for Live mode.
+
 > Note: biosignalsplux APIs vary by version. The connector is implemented with runtime compatibility fallbacks; if your local stack differs, we can adapt quickly based on your error log.
 
 ## Build Windows EXE (later)
