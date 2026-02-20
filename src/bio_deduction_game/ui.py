@@ -6,7 +6,7 @@ from typing import Deque, Dict, List, Tuple
 
 import pyqtgraph as pg
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -66,8 +66,13 @@ class PlayerCard(QFrame):
         self._style_plot(self.hr_plot, "HR")
         self._style_plot(self.eda_plot, "EDA")
 
-        self.hr_curve = self.hr_plot.plot(pen=pg.mkPen(color=accent, width=2))
-        self.eda_curve = self.eda_plot.plot(pen=pg.mkPen(color="#62d0ff", width=2))
+        hr_color = QColor(accent)
+        hr_color.setAlphaF(0.8)
+        eda_color = QColor(accent)
+        eda_color.setAlphaF(0.6)
+
+        self.hr_curve = self.hr_plot.plot(pen=pg.mkPen(color=hr_color, width=2))
+        self.eda_curve = self.eda_plot.plot(pen=pg.mkPen(color=eda_color, width=2))
 
         root.addWidget(self.hr_plot)
         root.addWidget(self.eda_plot)
@@ -378,8 +383,8 @@ class MainWindow(QMainWindow):
                 max-height: 320px;
             }
             QLabel#nameLabel {
-                font-weight: 700;
-                font-size: 14px;
+                font-weight: 800;
+                font-size: 18px;
             }
             QLabel#hrLabel {
                 font-weight: 700;
