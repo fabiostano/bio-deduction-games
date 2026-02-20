@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from threading import Lock, Thread
+from typing import Callable, Dict, List, Optional
+import math
 import random
 import time
 
@@ -22,17 +24,16 @@ class PlayerAssignment:
 
 
 class DataProvider:
-    """Interface for biosignal providers."""
-
     source_name: str = "unknown"
 
     def get_samples(self) -> Dict[str, Sample]:
         raise NotImplementedError
 
+    def close(self) -> None:
+        return
+
 
 class MockProvider(DataProvider):
-    """Demo provider with plausible-looking values for UI development."""
-
     source_name = "Mock Data"
 
     def __init__(self, player_ids: List[str]) -> None:
@@ -47,79 +48,230 @@ class MockProvider(DataProvider):
         for pid in self.player_ids:
             self.hr_base[pid] += random.uniform(-0.8, 0.8)
             self.hr_base[pid] = max(50.0, min(130.0, self.hr_base[pid]))
-
             self.eda_base[pid] += random.uniform(-0.12, 0.12)
             self.eda_base[pid] = max(0.1, min(20.0, self.eda_base[pid]))
 
-            hr = self.hr_base[pid] + random.uniform(-1.5, 1.5)
-            eda = self.eda_base[pid] + random.uniform(-0.2, 0.2)
-
-            out[pid] = Sample(t=now, hr=hr, eda=eda)
-
+            out[pid] = Sample(
+                t=now,
+                hr=self.hr_base[pid] + random.uniform(-1.5, 1.5),
+                eda=self.eda_base[pid] + random.uniform(-0.2, 0.2),
+            )
         return out
 
 
 class LiveHubProvider(DataProvider):
-    """OpenSignals Hub live provider scaffold.
+    """Concrete live approach via biosignalsplux (best-effort, version-tolerant).
 
-    Notes:
-    - Discovery and low-level streaming differ by OpenSignals setup/version.
-    - This class is intentionally structured for real integration and currently
-      returns empty samples when no backend is wired.
+    - Expects OpenSignals/BioPlux stack available on the machine.
+    - Uses fixed channel mapping from PlayerAssignment.
+    - Internally derives HR from ECG channel (simple peak detector placeholder).
     """
 
     source_name = "Live Data"
 
-    def __init__(self, assignments: List[PlayerAssignment]) -> None:
+    def __init__(self, assignments: List[PlayerAssignment], sampling_rate: int = 1000) -> None:
         self.assignments = assignments
-        self._backend_name = self._detect_backend()
+        self.sampling_rate = sampling_rate
+        self._samples: Dict[str, Sample] = {}
+        self._lock = Lock()
+
+        self._last_ecg: Dict[str, float] = {}
+        self._last_peak_ts: Dict[str, float] = {}
+        self._hr: Dict[str, float] = {}
+
+        self._stop = False
+        self._worker: Optional[Thread] = None
+
+        self._backend_name = "none"
+        self.status = "idle"
+
+        self._start_worker()
 
     @property
     def backend_name(self) -> str:
         return self._backend_name
 
-    def _detect_backend(self) -> str:
-        try:
-            import biosignalsplux  # type: ignore  # noqa: F401
+    def _start_worker(self) -> None:
+        self._worker = Thread(target=self._run_worker, daemon=True)
+        self._worker.start()
 
-            return "biosignalsplux"
+    def _run_worker(self) -> None:
+        try:
+            import biosignalsplux as bsp  # type: ignore
+
+            self._backend_name = "biosignalsplux"
         except Exception:
-            return "none"
+            self._backend_name = "none"
+            self.status = "biosignalsplux not installed"
+            return
+
+        self.status = "connecting"
+
+        per_hub: Dict[str, List[PlayerAssignment]] = {}
+        for a in self.assignments:
+            per_hub.setdefault(a.hub_mac, []).append(a)
+
+        hub_threads: List[Thread] = []
+        for hub_mac, hub_assignments in per_hub.items():
+            t = Thread(target=self._run_single_hub, args=(bsp, hub_mac, hub_assignments), daemon=True)
+            hub_threads.append(t)
+            t.start()
+
+        self.status = "streaming"
+        while not self._stop:
+            time.sleep(0.2)
+
+    def _run_single_hub(self, bsp, hub_mac: str, assignments: List[PlayerAssignment]) -> None:
+        # This adapter intentionally tries several common API variants because
+        # biosignalsplux distributions differ between OS/versions.
+        device = None
+
+        class _CallbackDevice(getattr(bsp, "Device", object)):  # type: ignore[misc]
+            def __init__(self, *args, on_frame: Callable[[List[float]], None], **kwargs):
+                self._on_frame = on_frame
+                super().__init__(*args, **kwargs)
+
+            def onRawFrame(self, *args):  # noqa: N802
+                analog: Optional[List[float]] = None
+                for arg in reversed(args):
+                    if isinstance(arg, (list, tuple)) and len(arg) > 0:
+                        try:
+                            analog = [float(x) for x in arg]
+                            break
+                        except Exception:
+                            continue
+                if analog is not None:
+                    self._on_frame(analog)
+                return True
+
+        def on_frame(analog: List[float]) -> None:
+            now = time.time()
+            for a in assignments:
+                i_ecg = a.channel_ekg - 1
+                i_eda = a.channel_eda - 1
+                if i_ecg >= len(analog) or i_eda >= len(analog):
+                    continue
+
+                ecg = float(analog[i_ecg])
+                eda = float(analog[i_eda])
+                hr = self._estimate_hr(a.player_name, ecg, now)
+
+                with self._lock:
+                    self._samples[a.player_name] = Sample(t=now, hr=hr, eda=eda)
+
+        try:
+            if hasattr(bsp, "Device"):
+                device = _CallbackDevice(hub_mac, on_frame=on_frame)
+            else:
+                self.status = "biosignalsplux Device class missing"
+                return
+
+            if hasattr(device, "open"):
+                device.open()
+
+            started = False
+            for args in [
+                (self.sampling_rate, 0xFF, 16),
+                (self.sampling_rate, 0xFF),
+                (self.sampling_rate,),
+            ]:
+                try:
+                    device.start(*args)
+                    started = True
+                    break
+                except Exception:
+                    continue
+
+            if not started:
+                self.status = f"failed to start hub {hub_mac}"
+                return
+
+            while not self._stop:
+                if hasattr(device, "loop"):
+                    try:
+                        device.loop()
+                    except Exception:
+                        time.sleep(0.01)
+                else:
+                    time.sleep(0.02)
+
+        except Exception as e:
+            self.status = f"hub {hub_mac} error: {e}"
+        finally:
+            if device is not None:
+                for m in ("stop", "close", "disconnect"):
+                    if hasattr(device, m):
+                        try:
+                            getattr(device, m)()
+                        except Exception:
+                            pass
+
+    def _estimate_hr(self, player: str, ecg: float, ts: float) -> float:
+        prev = self._last_ecg.get(player, ecg)
+        self._last_ecg[player] = ecg
+
+        threshold = 0.65 * max(1.0, abs(prev))
+        rising = ecg > threshold and prev <= threshold
+
+        if rising:
+            last_peak = self._last_peak_ts.get(player)
+            if last_peak is not None:
+                rr = ts - last_peak
+                if 0.35 <= rr <= 1.5:
+                    inst_hr = 60.0 / rr
+                    old = self._hr.get(player, inst_hr)
+                    self._hr[player] = old * 0.7 + inst_hr * 0.3
+            self._last_peak_ts[player] = ts
+
+        return self._hr.get(player, 0.0)
 
     def get_samples(self) -> Dict[str, Sample]:
-        # TODO: Implement real stream ingestion from OpenSignals Hub.
-        # Expected mapping per player on each hub:
-        #   1=Player1_EKG, 2=Player1_EDA, 3=Player2_EKG, 4=Player2_EDA,
-        #   5=Player3_EKG, 6=Player3_EDA, 7=Player4_EKG, 8=Player4_EDA
-        return {}
+        with self._lock:
+            return dict(self._samples)
+
+    def close(self) -> None:
+        self._stop = True
+        if self._worker and self._worker.is_alive():
+            self._worker.join(timeout=1.5)
 
 
 def discover_connected_hubs() -> List[str]:
-    """Best-effort hub discovery scaffold.
+    """Best-effort OpenSignals/BioPlux hub discovery.
 
-    Returns a list of connected hub identifiers (MACs preferred).
-    Currently supports manual fallback only; auto-discovery hook is prepared.
+    Tries common biosignalsplux scan/discovery entry points.
     """
 
-    auto: List[str] = []
+    try:
+        import biosignalsplux as bsp  # type: ignore
+    except Exception:
+        return []
 
-    # Future: try OpenSignals SDK discovery API here when available.
-    if auto:
-        return auto[:2]
+    candidates = ["discover", "scan", "search", "find", "find_devices", "discoverDevices"]
+    for name in candidates:
+        fn = getattr(bsp, name, None)
+        if not callable(fn):
+            continue
+        try:
+            result = fn()
+        except Exception:
+            continue
+
+        hubs: List[str] = []
+        if isinstance(result, (list, tuple)):
+            for item in result:
+                if isinstance(item, str):
+                    hubs.append(item)
+                else:
+                    mac = getattr(item, "mac", None) or getattr(item, "address", None)
+                    if mac:
+                        hubs.append(str(mac))
+        if hubs:
+            return hubs[:2]
 
     return []
 
 
 def build_assignments(players: List[str], hub_macs: List[str]) -> List[PlayerAssignment]:
-    """Distribute players across hubs and map fixed channel pairs.
-
-    Channel layout per hub:
-      1/2 -> player1 EKG/EDA
-      3/4 -> player2 EKG/EDA
-      5/6 -> player3 EKG/EDA
-      7/8 -> player4 EKG/EDA
-    """
-
     hubs = [h.strip() for h in hub_macs if h.strip()][:2]
     if not hubs:
         return []
@@ -133,14 +285,12 @@ def build_assignments(players: List[str], hub_macs: List[str]) -> List[PlayerAss
         if slot >= 4:
             continue
 
-        ekg_ch = slot * 2 + 1
-        eda_ch = slot * 2 + 2
         assignments.append(
             PlayerAssignment(
                 player_name=player,
                 hub_mac=hub,
-                channel_ekg=ekg_ch,
-                channel_eda=eda_ch,
+                channel_ekg=slot * 2 + 1,
+                channel_eda=slot * 2 + 2,
             )
         )
         per_hub[hub] += 1

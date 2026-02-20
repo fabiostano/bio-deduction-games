@@ -16,7 +16,8 @@ Generic live biosignal companion app for social deduction games (Werewolf, Impos
   - Live HR (absolute value)
   - HR trend plot (last 60s)
   - EDA trend plot (last 60s)
-- Live data integration scaffold for OpenSignals Hub (backend hook prepared)
+- Live data integration (biosignalsplux-based, best-effort API compatibility)
+- Hub discovery (best-effort) + manual MAC fallback
 - In-game elimination helper: click player card to hide, restore from bottom bar
 
 ## Stack
@@ -31,6 +32,17 @@ source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -e .
 python -m bio_deduction_game
 ```
+
+## Live Data (OpenSignals/BioPlux)
+- Select **Live Data** in the start menu.
+- Use **Hubs erkennen** or enter MACs manually.
+- Mapping preview shows fixed channel assignment:
+  - CH1/2 = Player1 EKG/EDA
+  - CH3/4 = Player2 EKG/EDA
+  - CH5/6 = Player3 EKG/EDA
+  - CH7/8 = Player4 EKG/EDA
+
+> Note: biosignalsplux APIs vary by version. The connector is implemented with runtime compatibility fallbacks; if your local stack differs, we can adapt quickly based on your error log.
 
 ## Build Windows EXE (later)
 We’ll add a PyInstaller build pipeline once the core UI/data flow is stable.

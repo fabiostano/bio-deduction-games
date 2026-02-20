@@ -383,13 +383,17 @@ class DashboardScreen(QWidget):
         self.players = players
         assignments = build_assignments(players, hubs)
 
+        if self.provider is not None:
+            self.provider.close()
+
         if source == "mock":
             self.provider = MockProvider(players)
             source_text = "Mock Data"
         else:
             self.provider = LiveHubProvider(assignments)
             backend = self.provider.backend_name if isinstance(self.provider, LiveHubProvider) else "unknown"
-            source_text = f"Live Data ({backend})"
+            details = self.provider.status if isinstance(self.provider, LiveHubProvider) else ""
+            source_text = f"Live Data ({backend}) {details}".strip()
 
         self.subtitle.setText(f"{mode} Mode • Live HR + EDA")
         self.status.setText(f"Data source: {source_text}")
@@ -613,6 +617,8 @@ class MainWindow(QMainWindow):
 
     def _back_to_start(self) -> None:
         self.dashboard.timer.stop()
+        if self.dashboard.provider is not None:
+            self.dashboard.provider.close()
         self.stack.setCurrentWidget(self.start_screen)
 
 
