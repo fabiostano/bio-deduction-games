@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Deque, Dict, List, Tuple
 
 import pyqtgraph as pg
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
     QApplication,
@@ -20,16 +20,22 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QRadioButton,
+    QScrollArea,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
 
-from .data import DataProvider, LiveHubProvider, MockProvider
+from .data import (
+    DataProvider,
+    LiveHubProvider,
+    MockProvider,
+    build_assignments,
+    discover_connected_hubs,
+)
 
 WINDOW_SECONDS = 60.0
 MAX_POINTS = 1200
-MAX_PLAYERS = 6
 
 
 @dataclass
@@ -40,9 +46,12 @@ class PlayerBuffer:
 
 
 class PlayerCard(QFrame):
+    clicked = Signal(str)
+
     def __init__(self, player_id: str, accent: str) -> None:
         super().__init__()
         self.player_id = player_id
+        self.accent = accent
         self.setObjectName("playerCard")
 
         root = QVBoxLayout(self)
@@ -53,11 +62,23 @@ class PlayerCard(QFrame):
         self.name_lbl = QLabel(player_id)
         self.name_lbl.setObjectName("nameLabel")
         self.name_lbl.setStyleSheet(f"color: {accent};")
+
+        self.heart_lbl = QLabel("♥")
+        self.heart_lbl.setObjectName("heartLabel")
+        self.heart_lbl.setStyleSheet(f"color: {accent};")
+
         self.hr_lbl = QLabel("-- bpm")
         self.hr_lbl.setObjectName("hrLabel")
+        self.hr_lbl.setStyleSheet(f"color: {accent};")
+
+        bpm_box = QHBoxLayout()
+        bpm_box.setSpacing(5)
+        bpm_box.addWidget(self.heart_lbl)
+        bpm_box.addWidget(self.hr_lbl)
+
         top.addWidget(self.name_lbl)
         top.addStretch(1)
-        top.addWidget(self.hr_lbl)
+        top.addLayout(bpm_box)
         root.addLayout(top)
 
         self.hr_plot = pg.PlotWidget()
@@ -77,6 +98,20 @@ class PlayerCard(QFrame):
         root.addWidget(self.hr_plot)
         root.addWidget(self.eda_plot)
 
+        self._pulse_on = True
+        self._pulse_timer = QTimer(self)
+        self._pulse_timer.timeout.connect(self._pulse)
+        self._pulse_timer.start(800)
+
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit(self.player_id)
+        super().mousePressEvent(event)
+
+    def _pulse(self) -> None:
+        self._pulse_on = not self._pulse_on
+        self.heart_lbl.setText("♥" if self._pulse_on else "♡")
+
     def _style_plot(self, plot: pg.PlotWidget, title: str) -> None:
         plot.setBackground("#101424")
         plot.showGrid(x=True, y=True, alpha=0.16)
@@ -89,7 +124,11 @@ class PlayerCard(QFrame):
 
     def update_data(self, x_sec: List[float], hrs: List[float], edas: List[float]) -> None:
         if hrs:
-            self.hr_lbl.setText(f"{hrs[-1]:.0f} bpm")
+            bpm = hrs[-1]
+            self.hr_lbl.setText(f"{bpm:.0f} bpm")
+            interval = int(max(350, min(1300, 60000 / max(bpm, 1.0))))
+            self._pulse_timer.setInterval(interval)
+
         self.hr_curve.setData(x_sec, hrs)
         self.eda_curve.setData(x_sec, edas)
 
@@ -122,25 +161,6 @@ class StartScreen(QWidget):
         mode_row.addStretch(1)
         panel_layout.addLayout(mode_row)
 
-        players_title = QLabel("Spieler")
-        players_title.setObjectName("sectionTitle")
-        panel_layout.addWidget(players_title)
-
-        self.players_box = QVBoxLayout()
-        self.players_box.setSpacing(8)
-        panel_layout.addLayout(self.players_box)
-
-        add_row = QHBoxLayout()
-        self.add_player_btn = QPushButton("+")
-        self.add_player_btn.setFixedWidth(34)
-        self.add_player_btn.clicked.connect(self.add_player_field)
-        add_row.addWidget(self.add_player_btn)
-        add_row.addWidget(QLabel("Spieler hinzufügen (max. 6)"))
-        add_row.addStretch(1)
-        panel_layout.addLayout(add_row)
-
-        panel_layout.addStretch(1)
-
         data_row = QHBoxLayout()
         data_row.addWidget(QLabel("Datenquelle:"))
         self.mock_radio = QRadioButton("Mock Data")
@@ -156,6 +176,66 @@ class StartScreen(QWidget):
         data_row.addStretch(1)
         panel_layout.addLayout(data_row)
 
+        hubs_title = QLabel("Hubs (MAC-Adressen)")
+        hubs_title.setObjectName("sectionTitle")
+        panel_layout.addWidget(hubs_title)
+
+        hub_row = QHBoxLayout()
+        self.detect_hubs_btn = QPushButton("Hubs erkennen")
+        self.detect_hubs_btn.clicked.connect(self.detect_hubs)
+        self.connected_hubs_lbl = QLabel("Keine Hubs erkannt")
+        self.connected_hubs_lbl.setObjectName("status")
+        hub_row.addWidget(self.detect_hubs_btn)
+        hub_row.addWidget(self.connected_hubs_lbl)
+        hub_row.addStretch(1)
+        panel_layout.addLayout(hub_row)
+
+        self.manual_hubs_edit = QLineEdit()
+        self.manual_hubs_edit.setPlaceholderText("Optional: MACs manuell (kommagetrennt), z.B. AA:..,BB:..")
+        self.manual_hubs_edit.textChanged.connect(self._refresh_limits)
+        panel_layout.addWidget(self.manual_hubs_edit)
+
+        players_title = QLabel("Spieler")
+        players_title.setObjectName("sectionTitle")
+        panel_layout.addWidget(players_title)
+
+        self.max_players_lbl = QLabel("Maximal 4 Spieler (1 Hub) / 8 Spieler (2 Hubs)")
+        self.max_players_lbl.setObjectName("status")
+        panel_layout.addWidget(self.max_players_lbl)
+
+        self.players_box = QVBoxLayout()
+        self.players_box.setSpacing(8)
+        panel_layout.addLayout(self.players_box)
+
+        add_row = QHBoxLayout()
+        self.add_player_btn = QPushButton("+")
+        self.add_player_btn.setFixedWidth(34)
+        self.add_player_btn.clicked.connect(self.add_player_field)
+        add_row.addWidget(self.add_player_btn)
+        self.add_hint = QLabel("Spieler hinzufügen")
+        add_row.addWidget(self.add_hint)
+        add_row.addStretch(1)
+        panel_layout.addLayout(add_row)
+
+        map_title = QLabel("Auto-Mapping (Orientierung)")
+        map_title.setObjectName("sectionTitle")
+        panel_layout.addWidget(map_title)
+
+        self.mapping_lbl = QLabel("Noch kein Mapping")
+        self.mapping_lbl.setWordWrap(True)
+        self.mapping_lbl.setObjectName("status")
+
+        mapping_scroll = QScrollArea()
+        mapping_scroll.setWidgetResizable(True)
+        mapping_widget = QWidget()
+        mlay = QVBoxLayout(mapping_widget)
+        mlay.setContentsMargins(0, 0, 0, 0)
+        mlay.addWidget(self.mapping_lbl)
+        mlay.addStretch(1)
+        mapping_scroll.setWidget(mapping_widget)
+        mapping_scroll.setMinimumHeight(120)
+        panel_layout.addWidget(mapping_scroll)
+
         root.addWidget(panel, 1)
 
         self.start_btn = QPushButton("Start")
@@ -163,31 +243,88 @@ class StartScreen(QWidget):
         root.addWidget(self.start_btn, alignment=Qt.AlignmentFlag.AlignRight)
 
         self.player_edits: List[QLineEdit] = []
+        self.detected_hubs: List[str] = []
+        self._max_players = 4
         self.add_player_field("Player 1")
+        self._refresh_limits()
+
+    def _parse_manual_hubs(self) -> List[str]:
+        raw = self.manual_hubs_edit.text().strip()
+        if not raw:
+            return []
+        return [x.strip() for x in raw.split(",") if x.strip()][:2]
+
+    def _active_hubs(self) -> List[str]:
+        manual = self._parse_manual_hubs()
+        return manual if manual else self.detected_hubs
+
+    def detect_hubs(self) -> None:
+        self.detected_hubs = discover_connected_hubs()
+        if self.detected_hubs:
+            self.connected_hubs_lbl.setText("Erkannt: " + " | ".join(self.detected_hubs))
+        else:
+            self.connected_hubs_lbl.setText("Keine Hubs erkannt (Fallback: manuell eintragen)")
+        self._refresh_limits()
+
+    def _refresh_limits(self) -> None:
+        hub_count = max(1, min(2, len(self._active_hubs()) or 1))
+        self._max_players = 4 if hub_count == 1 else 8
+
+        self.max_players_lbl.setText(f"Aktuell max. {self._max_players} Spieler ({hub_count} Hub(s))")
+
+        while len(self.player_edits) > self._max_players:
+            edit = self.player_edits.pop()
+            edit.setParent(None)
+
+        self.add_player_btn.setEnabled(len(self.player_edits) < self._max_players)
+        self._update_mapping_preview()
 
     def add_player_field(self, default_text: str | None = None) -> None:
-        if len(self.player_edits) >= MAX_PLAYERS:
+        if len(self.player_edits) >= self._max_players:
             return
         idx = len(self.player_edits) + 1
         edit = QLineEdit()
         edit.setPlaceholderText(f"Player {idx}")
         if default_text:
             edit.setText(default_text)
+        edit.textChanged.connect(self._update_mapping_preview)
         self.player_edits.append(edit)
         self.players_box.addWidget(edit)
 
-        self.add_player_btn.setEnabled(len(self.player_edits) < MAX_PLAYERS)
+        self.add_player_btn.setEnabled(len(self.player_edits) < self._max_players)
+        self._update_mapping_preview()
 
-    def get_config(self) -> Tuple[str, str, List[str]]:
-        mode = self.mode_combo.currentText()
-        source = "live" if self.live_radio.isChecked() else "mock"
-
+    def _effective_players(self) -> List[str]:
         players: List[str] = []
         for i, edit in enumerate(self.player_edits, start=1):
-            name = edit.text().strip()
-            players.append(name or f"Player {i}")
+            players.append(edit.text().strip() or f"Player {i}")
+        return players
 
-        return mode, source, players
+    def _update_mapping_preview(self) -> None:
+        hubs = self._active_hubs()
+        players = self._effective_players()
+        if not hubs:
+            self.mapping_lbl.setText("Keine Hub-MAC vorhanden. Für Live: Hubs erkennen oder manuell eintragen.")
+            return
+
+        assignments = build_assignments(players, hubs)
+        if not assignments:
+            self.mapping_lbl.setText("Kein Mapping verfügbar.")
+            return
+
+        lines = []
+        for a in assignments:
+            lines.append(
+                f"{a.player_name} → {a.hub_mac} | CH{a.channel_ekg}=EKG, CH{a.channel_eda}=EDA"
+            )
+        self.mapping_lbl.setText("\n".join(lines))
+
+    def get_config(self) -> Tuple[str, str, List[str], List[str]]:
+        mode = self.mode_combo.currentText()
+        source = "live" if self.live_radio.isChecked() else "mock"
+        players = self._effective_players()
+        hubs = self._active_hubs()
+        return mode, source, players, hubs
 
 
 class DashboardScreen(QWidget):
@@ -197,6 +334,7 @@ class DashboardScreen(QWidget):
         self.players: List[str] = []
         self.cards: Dict[str, PlayerCard] = {}
         self.buffers: Dict[str, PlayerBuffer] = {}
+        self.hidden_players: set[str] = set()
 
         root = QVBoxLayout(self)
         root.setContentsMargins(14, 14, 14, 14)
@@ -222,20 +360,37 @@ class DashboardScreen(QWidget):
         root.addLayout(header)
 
         self.grid = QGridLayout()
-        self.grid.setSpacing(20)
+        self.grid.setSpacing(24)
         root.addLayout(self.grid, 1)
+
+        elim_title = QLabel("Eliminierte Spieler (klicken zum Zurückholen)")
+        elim_title.setObjectName("subtitle")
+        root.addWidget(elim_title)
+
+        self.elim_bar = QHBoxLayout()
+        self.elim_bar.setSpacing(8)
+        root.addLayout(self.elim_bar)
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._tick)
 
-    def start(self, mode: str, source: str, players: List[str]) -> None:
+    def start(self, mode: str, source: str, players: List[str], hubs: List[str]) -> None:
         self.timer.stop()
         self._clear_grid()
+        self._clear_elim_bar()
+        self.hidden_players = set()
 
         self.players = players
-        self.provider = MockProvider(players) if source == "mock" else LiveHubProvider(players)
+        assignments = build_assignments(players, hubs)
 
-        source_text = "Mock Data" if source == "mock" else "Live Data (placeholder)"
+        if source == "mock":
+            self.provider = MockProvider(players)
+            source_text = "Mock Data"
+        else:
+            self.provider = LiveHubProvider(assignments)
+            backend = self.provider.backend_name if isinstance(self.provider, LiveHubProvider) else "unknown"
+            source_text = f"Live Data ({backend})"
+
         self.subtitle.setText(f"{mode} Mode • Live HR + EDA")
         self.status.setText(f"Data source: {source_text}")
 
@@ -244,16 +399,54 @@ class DashboardScreen(QWidget):
             for p in players
         }
 
-        colors = ["#f7c948", "#ff7f7f", "#8ce99a", "#9ecbff", "#f4a6ff", "#ffd8a8"]
+        colors = [
+            "#f7c948",
+            "#ff7f7f",
+            "#8ce99a",
+            "#9ecbff",
+            "#f4a6ff",
+            "#ffd8a8",
+            "#98f5e1",
+            "#ffd43b",
+        ]
         self.cards = {}
 
         for i, p in enumerate(players):
             card = PlayerCard(p, colors[i % len(colors)])
+            card.clicked.connect(self._eliminate_player)
             self.cards[p] = card
-            r, c = divmod(i, 3)
+            r, c = divmod(i, 4)
             self.grid.addWidget(card, r, c)
 
         self.timer.start(200)
+
+    def _eliminate_player(self, player: str) -> None:
+        if player in self.hidden_players:
+            return
+        card = self.cards.get(player)
+        if not card:
+            return
+        card.hide()
+        self.hidden_players.add(player)
+
+        btn = QPushButton(player)
+        btn.setObjectName("elimBtn")
+        btn.clicked.connect(lambda: self._restore_player(player, btn))
+        self.elim_bar.addWidget(btn)
+
+    def _restore_player(self, player: str, button: QPushButton) -> None:
+        card = self.cards.get(player)
+        if card:
+            card.show()
+        self.hidden_players.discard(player)
+        button.setParent(None)
+
+    def _clear_elim_bar(self) -> None:
+        while self.elim_bar.count():
+            item = self.elim_bar.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
 
     def _clear_grid(self) -> None:
         while self.grid.count():
@@ -303,7 +496,7 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Bio Deduction Games")
-        self.resize(1600, 950)
+        self.resize(1700, 980)
 
         self.stack = QStackedWidget()
         self.setCentralWidget(self.stack)
@@ -375,31 +568,47 @@ class MainWindow(QMainWindow):
             QPushButton#primaryBtn:hover {
                 background: #4776ff;
             }
+            QPushButton#elimBtn {
+                background: #3a274f;
+                border-color: #614080;
+            }
             QFrame#playerCard {
                 background: #121a32;
                 border: 1px solid #223156;
                 border-radius: 12px;
-                min-height: 240px;
-                max-height: 320px;
+                min-height: 220px;
+                max-height: 300px;
             }
             QLabel#nameLabel {
                 font-weight: 800;
-                font-size: 18px;
+                font-size: 22px;
             }
             QLabel#hrLabel {
-                font-weight: 700;
-                font-size: 21px;
+                font-weight: 800;
+                font-size: 23px;
+            }
+            QLabel#heartLabel {
+                font-size: 24px;
+                font-weight: 800;
             }
             """
         )
 
     def _start_game(self) -> None:
-        mode, source, players = self.start_screen.get_config()
+        mode, source, players, hubs = self.start_screen.get_config()
         if not players:
             QMessageBox.warning(self, "Fehlende Spieler", "Bitte mindestens einen Spieler anlegen.")
             return
 
-        self.dashboard.start(mode, source, players)
+        if len(players) > 4 and len(hubs) < 2:
+            QMessageBox.warning(
+                self,
+                "Zu viele Spieler",
+                "Mehr als 4 Spieler benötigen 2 verbundene Hubs (oder 2 MACs im Setup).",
+            )
+            return
+
+        self.dashboard.start(mode, source, players, hubs)
         self.stack.setCurrentWidget(self.dashboard)
 
     def _back_to_start(self) -> None:

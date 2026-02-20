@@ -5,16 +5,19 @@ Generic live biosignal companion app for social deduction games (Werewolf, Impos
 ## Current scope (v0)
 - Modern gameshow-style UI
 - Start menu with:
-  - Data source toggle: **Mock Data / Live Data (placeholder)**
-  - Dynamic player setup (1..6 via `+` button)
+  - Data source toggle: **Mock Data / Live Data (scaffold)**
+  - Dynamic player setup via `+`
+  - Hub MAC section with detect button + manual fallback
+  - Auto-mapping preview player → hub MAC → EKG/EDA channels
   - Game mode selector (currently: **Generic**)
 - Generic mode (no game logic tied to a specific game yet)
-- Up to **2 hubs × 3 players = 6 players**
+- Up to **8 players with 2 hubs** / **4 players with 1 hub**
 - Per player:
   - Live HR (absolute value)
   - HR trend plot (last 60s)
   - EDA trend plot (last 60s)
-- Data source abstraction for future OpenSignals Hub integration
+- Live data integration scaffold for OpenSignals Hub (backend hook prepared)
+- In-game elimination helper: click player card to hide, restore from bottom bar
 
 ## Stack
 - Python 3.11+
