@@ -14,11 +14,7 @@ class Sample:
 
 
 class DataProvider:
-    """Interface for biosignal providers.
-
-    Future implementation:
-    - OpenSignals Hub adapter
-    """
+    """Interface for biosignal providers."""
 
     def get_samples(self) -> Dict[str, Sample]:
         raise NotImplementedError
@@ -49,3 +45,16 @@ class MockProvider(DataProvider):
             out[pid] = Sample(t=now, hr=hr, eda=eda)
 
         return out
+
+
+class LiveHubProvider(DataProvider):
+    """Placeholder for future OpenSignals Hub integration.
+
+    Intentionally returns no samples until live integration is implemented.
+    """
+
+    def __init__(self, player_ids: List[str]) -> None:
+        self.player_ids = player_ids
+
+    def get_samples(self) -> Dict[str, Sample]:
+        return {}

@@ -4,6 +4,10 @@ Generic live biosignal companion app for social deduction games (Werewolf, Impos
 
 ## Current scope (v0)
 - Modern gameshow-style UI
+- Start menu with:
+  - Data source toggle: **Mock Data / Live Data (placeholder)**
+  - Dynamic player setup (1..6 via `+` button)
+  - Game mode selector (currently: **Generic**)
 - Generic mode (no game logic tied to a specific game yet)
 - Up to **2 hubs × 3 players = 6 players**
 - Per player:
