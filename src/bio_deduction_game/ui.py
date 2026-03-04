@@ -5,13 +5,14 @@ from dataclasses import dataclass
 from typing import Deque, Dict, List, Tuple
 
 import pyqtgraph as pg
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QSequentialAnimationGroup, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
     QComboBox,
     QFrame,
+    QGraphicsOpacityEffect,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -149,10 +150,12 @@ class StartScreen(QWidget):
         root.addWidget(subtitle)
 
         panel = QFrame()
+        self.setup_panel = panel
         panel.setObjectName("setupPanel")
+        panel.setMaximumWidth(980)
         panel_layout = QVBoxLayout(panel)
-        panel_layout.setContentsMargins(14, 14, 14, 14)
-        panel_layout.setSpacing(12)
+        panel_layout.setContentsMargins(18, 18, 18, 18)
+        panel_layout.setSpacing(14)
 
         mode_row = QHBoxLayout()
         mode_row.addWidget(QLabel("Spielmodus:"))
@@ -257,10 +260,15 @@ class StartScreen(QWidget):
         mapping_scroll.setMinimumHeight(120)
         panel_layout.addWidget(mapping_scroll)
 
-        root.addWidget(panel, 1)
+        panel_row = QHBoxLayout()
+        panel_row.addStretch(1)
+        panel_row.addWidget(panel, 1)
+        panel_row.addStretch(1)
+        root.addLayout(panel_row, 1)
 
         self.start_btn = QPushButton("Start")
         self.start_btn.setObjectName("primaryBtn")
+        self.start_btn.setMinimumHeight(44)
         root.addWidget(self.start_btn, alignment=Qt.AlignmentFlag.AlignRight)
 
         self.player_edits: List[QLineEdit] = []
@@ -268,6 +276,7 @@ class StartScreen(QWidget):
         self._max_players = 4
         self.add_player_field("Player 1")
         self._refresh_limits()
+        self._setup_intro_animation()
 
     def _live_uses_lsl(self) -> bool:
         return self.live_radio.isChecked() and self.live_backend_combo.currentText().startswith("OpenSignals")
@@ -314,6 +323,31 @@ class StartScreen(QWidget):
 
         self.add_player_btn.setEnabled(len(self.player_edits) < self._max_players)
         self._update_mapping_preview()
+
+    def _setup_intro_animation(self) -> None:
+        self._intro_effect = QGraphicsOpacityEffect(self.setup_panel)
+        self.setup_panel.setGraphicsEffect(self._intro_effect)
+        self._intro_effect.setOpacity(0.0)
+
+        fade = QPropertyAnimation(self._intro_effect, b"opacity", self)
+        fade.setDuration(420)
+        fade.setStartValue(0.0)
+        fade.setEndValue(1.0)
+        fade.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        btn_fade_effect = QGraphicsOpacityEffect(self.start_btn)
+        self.start_btn.setGraphicsEffect(btn_fade_effect)
+        btn_fade_effect.setOpacity(0.0)
+        btn_fade = QPropertyAnimation(btn_fade_effect, b"opacity", self)
+        btn_fade.setDuration(280)
+        btn_fade.setStartValue(0.0)
+        btn_fade.setEndValue(1.0)
+        btn_fade.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        self._intro_anim = QSequentialAnimationGroup(self)
+        self._intro_anim.addAnimation(fade)
+        self._intro_anim.addAnimation(btn_fade)
+        self._intro_anim.start()
 
     def add_player_field(self, default_text: str | None = None) -> None:
         if len(self.player_edits) >= self._max_players:
@@ -582,7 +616,8 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(
             """
             QMainWindow, QWidget {
-                background: #0b1020;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #0a0f1f, stop:1 #101a34);
                 color: #E6ECFF;
                 font-family: Segoe UI, Inter, Arial;
             }
@@ -606,35 +641,43 @@ class MainWindow(QMainWindow):
                 color: #C7D4F4;
             }
             QFrame#setupPanel {
-                background: #121a32;
-                border: 1px solid #223156;
-                border-radius: 12px;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #121b35, stop:1 #162449);
+                border: 1px solid #2c3f70;
+                border-radius: 16px;
             }
             QLineEdit, QComboBox {
-                background: #121a32;
-                border: 1px solid #2a3a64;
-                border-radius: 8px;
-                padding: 7px 10px;
+                background: #101a33;
+                border: 1px solid #314674;
+                border-radius: 10px;
+                padding: 8px 11px;
                 color: #E6ECFF;
+                min-height: 18px;
+            }
+            QLineEdit:focus, QComboBox:focus {
+                border: 1px solid #5a86ff;
             }
             QPushButton {
                 background: #1D2A4A;
-                border: 1px solid #2f3d66;
-                border-radius: 8px;
+                border: 1px solid #355186;
+                border-radius: 10px;
                 padding: 8px 12px;
                 color: #E6ECFF;
             }
             QPushButton:hover {
-                background: #27365b;
+                background: #2a3f6b;
+                border-color: #4d71b7;
             }
             QPushButton#primaryBtn {
-                background: #2b5fff;
-                border-color: #2b5fff;
-                font-weight: 700;
-                min-width: 120px;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #2f63ff, stop:1 #5d83ff);
+                border-color: #5d83ff;
+                font-weight: 800;
+                min-width: 150px;
             }
             QPushButton#primaryBtn:hover {
-                background: #4776ff;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #4975ff, stop:1 #7597ff);
             }
             QPushButton#elimBtn {
                 background: #3a274f;
