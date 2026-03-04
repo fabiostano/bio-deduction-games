@@ -108,7 +108,7 @@ class PlayerCard(QFrame):
         self.overlay = QLabel("💔", self)
         self.overlay.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.overlay.setStyleSheet(
-            "background-color: rgba(7, 10, 18, 0.40);"
+            "background-color: rgba(7, 10, 18, 0.62);"
             "color: #ff6b81; font-size: 56px; font-weight: 800;"
             "border-radius: 12px;"
         )
@@ -170,7 +170,7 @@ class StartScreen(QWidget):
         panel = QFrame()
         self.setup_panel = panel
         panel.setObjectName("setupPanel")
-        panel.setMaximumWidth(980)
+        panel.setMaximumWidth(1370)
         panel_layout = QVBoxLayout(panel)
         panel_layout.setContentsMargins(18, 18, 18, 18)
         panel_layout.setSpacing(14)
@@ -245,8 +245,11 @@ class StartScreen(QWidget):
         self.max_players_lbl.setObjectName("status")
         panel_layout.addWidget(self.max_players_lbl)
 
-        self.players_box = QVBoxLayout()
-        self.players_box.setSpacing(8)
+        self.players_box = QGridLayout()
+        self.players_box.setHorizontalSpacing(14)
+        self.players_box.setVerticalSpacing(8)
+        self.players_box.setColumnStretch(0, 1)
+        self.players_box.setColumnStretch(1, 1)
         panel_layout.addLayout(self.players_box)
 
         add_row = QHBoxLayout()
@@ -263,19 +266,23 @@ class StartScreen(QWidget):
         map_title.setObjectName("sectionTitle")
         panel_layout.addWidget(map_title)
 
-        self.mapping_lbl = QLabel("Noch kein Mapping")
-        self.mapping_lbl.setWordWrap(True)
-        self.mapping_lbl.setObjectName("status")
+        self.mapping_left_lbl = QLabel("Noch kein Mapping")
+        self.mapping_left_lbl.setWordWrap(True)
+        self.mapping_left_lbl.setObjectName("status")
+        self.mapping_right_lbl = QLabel("")
+        self.mapping_right_lbl.setWordWrap(True)
+        self.mapping_right_lbl.setObjectName("status")
 
         mapping_scroll = QScrollArea()
         mapping_scroll.setWidgetResizable(True)
         mapping_widget = QWidget()
-        mlay = QVBoxLayout(mapping_widget)
+        mlay = QHBoxLayout(mapping_widget)
         mlay.setContentsMargins(0, 0, 0, 0)
-        mlay.addWidget(self.mapping_lbl)
-        mlay.addStretch(1)
+        mlay.setSpacing(24)
+        mlay.addWidget(self.mapping_left_lbl, 1)
+        mlay.addWidget(self.mapping_right_lbl, 1)
         mapping_scroll.setWidget(mapping_widget)
-        mapping_scroll.setMinimumHeight(120)
+        mapping_scroll.setMinimumHeight(140)
         panel_layout.addWidget(mapping_scroll)
 
         panel_row = QHBoxLayout()
@@ -338,6 +345,7 @@ class StartScreen(QWidget):
             edit = self.player_edits.pop()
             edit.setParent(None)
 
+        self._reflow_player_fields()
         self.add_player_btn.setEnabled(len(self.player_edits) < self._max_players)
         self._update_mapping_preview()
 
@@ -366,6 +374,18 @@ class StartScreen(QWidget):
         self._intro_anim.addAnimation(btn_fade)
         self._intro_anim.start()
 
+    def _reflow_player_fields(self) -> None:
+        while self.players_box.count():
+            item = self.players_box.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+
+        for i, edit in enumerate(self.player_edits):
+            row = i % 4
+            col = i // 4
+            self.players_box.addWidget(edit, row, col)
+
     def add_player_field(self, default_text: str | None = None) -> None:
         if len(self.player_edits) >= self._max_players:
             return
@@ -376,7 +396,7 @@ class StartScreen(QWidget):
             edit.setText(default_text)
         edit.textChanged.connect(self._update_mapping_preview)
         self.player_edits.append(edit)
-        self.players_box.addWidget(edit)
+        self._reflow_player_fields()
 
         self.add_player_btn.setEnabled(len(self.player_edits) < self._max_players)
         self._update_mapping_preview()
@@ -394,25 +414,26 @@ class StartScreen(QWidget):
         if self._live_uses_lsl():
             hubs = ["LSL"]
         elif not hubs:
-            self.mapping_lbl.setText("Keine Hub-MAC vorhanden. Für Live: Hubs erkennen oder manuell eintragen.")
+            msg = "Keine Hub-MAC vorhanden. Für Live: Hubs erkennen oder manuell eintragen."
+            self.mapping_left_lbl.setText(msg)
+            self.mapping_right_lbl.setText("")
             return
 
         assignments = build_assignments(players, hubs, include_eda=self._include_eda())
         if not assignments:
-            self.mapping_lbl.setText("Kein Mapping verfügbar.")
+            self.mapping_left_lbl.setText("Kein Mapping verfügbar.")
+            self.mapping_right_lbl.setText("")
             return
 
         lines = []
         for a in assignments:
             if a.channel_eda > 0:
-                lines.append(
-                    f"{a.player_name} → {a.hub_mac} | CH{a.channel_ekg}=EKG, CH{a.channel_eda}=EDA"
-                )
+                lines.append(f"{a.player_name} → {a.hub_mac} | CH{a.channel_ekg}=EKG, CH{a.channel_eda}=EDA")
             else:
-                lines.append(
-                    f"{a.player_name} → {a.hub_mac} | CH{a.channel_ekg}=EKG, EDA übersprungen"
-                )
-        self.mapping_lbl.setText("\n".join(lines))
+                lines.append(f"{a.player_name} → {a.hub_mac} | CH{a.channel_ekg}=EKG, EDA übersprungen")
+
+        self.mapping_left_lbl.setText("\n".join(lines[:4]))
+        self.mapping_right_lbl.setText("\n".join(lines[4:8]))
 
     def get_config(self) -> Tuple[str, str, List[str], List[str], str, bool]:
         mode = self.mode_combo.currentText()
@@ -556,7 +577,7 @@ class DashboardScreen(QWidget):
         samples = self.provider.get_samples()
 
         for pid, s in samples.items():
-            if pid not in self.buffers:
+            if pid not in self.buffers or pid in self.hidden_players:
                 continue
             b = self.buffers[pid]
             b.ts.append(s.t)
