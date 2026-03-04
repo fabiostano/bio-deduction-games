@@ -105,10 +105,23 @@ class PlayerCard(QFrame):
         self._pulse_timer.timeout.connect(self._pulse)
         self._pulse_timer.start(800)
 
+        self.overlay = QLabel("💔", self)
+        self.overlay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.overlay.setStyleSheet(
+            "background-color: rgba(7, 10, 18, 0.40);"
+            "color: #ff6b81; font-size: 56px; font-weight: 800;"
+            "border-radius: 12px;"
+        )
+        self.overlay.hide()
+
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
         if event.button() == Qt.MouseButton.LeftButton:
             self.clicked.emit(self.player_id)
         super().mousePressEvent(event)
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self.overlay.setGeometry(self.rect())
 
     def _pulse(self) -> None:
         self._pulse_on = not self._pulse_on
@@ -123,6 +136,9 @@ class PlayerCard(QFrame):
         plot.getAxis("bottom").setTextPen("#C9D1E5")
         plot.setMenuEnabled(False)
         plot.setMouseEnabled(x=False, y=False)
+
+    def set_eliminated(self, eliminated: bool) -> None:
+        self.overlay.setVisible(eliminated)
 
     def update_data(self, x_sec: List[float], hrs: List[float], edas: List[float]) -> None:
         if hrs:
@@ -146,6 +162,8 @@ class StartScreen(QWidget):
         title.setObjectName("title")
         subtitle = QLabel("Setup • Generic social-deduction companion")
         subtitle.setObjectName("subtitle")
+        title.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        subtitle.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         root.addWidget(title)
         root.addWidget(subtitle)
 
@@ -269,7 +287,7 @@ class StartScreen(QWidget):
         self.start_btn = QPushButton("Start")
         self.start_btn.setObjectName("primaryBtn")
         self.start_btn.setMinimumHeight(44)
-        root.addWidget(self.start_btn, alignment=Qt.AlignmentFlag.AlignRight)
+        root.addWidget(self.start_btn, alignment=Qt.AlignmentFlag.AlignHCenter)
 
         self.player_edits: List[QLineEdit] = []
         self.detected_hubs: List[str] = []
@@ -303,19 +321,18 @@ class StartScreen(QWidget):
         self._refresh_limits()
 
     def _refresh_limits(self) -> None:
+        hub_count = max(1, min(2, len(self._active_hubs()) or 1))
+        self._max_players = 8
+
         if self._live_uses_lsl():
-            hub_count = 1
-            self._max_players = 4
             self.detect_hubs_btn.setEnabled(False)
             self.manual_hubs_edit.setEnabled(False)
             self.connected_hubs_lbl.setText("LSL-Modus: Hub-Erkennung nicht nötig")
         else:
-            hub_count = max(1, min(2, len(self._active_hubs()) or 1))
-            self._max_players = 4 if hub_count == 1 else 8
             self.detect_hubs_btn.setEnabled(True)
             self.manual_hubs_edit.setEnabled(True)
 
-        self.max_players_lbl.setText(f"Aktuell max. {self._max_players} Spieler ({hub_count} Hub(s))")
+        self.max_players_lbl.setText(f"Aktuell max. {self._max_players} Spieler (Hub(s): {hub_count})")
 
         while len(self.player_edits) > self._max_players:
             edit = self.player_edits.pop()
@@ -443,14 +460,6 @@ class DashboardScreen(QWidget):
         self.grid.setSpacing(24)
         root.addLayout(self.grid, 1)
 
-        elim_title = QLabel("Eliminierte Spieler (klicken zum Zurückholen)")
-        elim_title.setObjectName("subtitle")
-        root.addWidget(elim_title)
-
-        self.elim_bar = QHBoxLayout()
-        self.elim_bar.setSpacing(8)
-        root.addLayout(self.elim_bar)
-
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._tick)
 
@@ -465,7 +474,6 @@ class DashboardScreen(QWidget):
     ) -> None:
         self.timer.stop()
         self._clear_grid()
-        self._clear_elim_bar()
         self.hidden_players = set()
 
         self.players = players
@@ -520,32 +528,16 @@ class DashboardScreen(QWidget):
         self.timer.start(200)
 
     def _eliminate_player(self, player: str) -> None:
-        if player in self.hidden_players:
-            return
         card = self.cards.get(player)
         if not card:
             return
-        card.hide()
-        self.hidden_players.add(player)
 
-        btn = QPushButton(player)
-        btn.setObjectName("elimBtn")
-        btn.clicked.connect(lambda: self._restore_player(player, btn))
-        self.elim_bar.addWidget(btn)
-
-    def _restore_player(self, player: str, button: QPushButton) -> None:
-        card = self.cards.get(player)
-        if card:
-            card.show()
-        self.hidden_players.discard(player)
-        button.setParent(None)
-
-    def _clear_elim_bar(self) -> None:
-        while self.elim_bar.count():
-            item = self.elim_bar.takeAt(0)
-            w = item.widget()
-            if w is not None:
-                w.setParent(None)
+        if player in self.hidden_players:
+            self.hidden_players.discard(player)
+            card.set_eliminated(False)
+        else:
+            self.hidden_players.add(player)
+            card.set_eliminated(True)
 
     def _clear_grid(self) -> None:
         while self.grid.count():
@@ -709,14 +701,6 @@ class MainWindow(QMainWindow):
         mode, source, players, hubs, live_backend, include_eda = self.start_screen.get_config()
         if not players:
             QMessageBox.warning(self, "Fehlende Spieler", "Bitte mindestens einen Spieler anlegen.")
-            return
-
-        if source == "live" and live_backend == "direct" and len(players) > 4 and len(hubs) < 2:
-            QMessageBox.warning(
-                self,
-                "Zu viele Spieler",
-                "Mehr als 4 Spieler benötigen 2 verbundene Hubs (oder 2 MACs im Setup).",
-            )
             return
 
         self.dashboard.start(mode, source, players, hubs, live_backend, include_eda)
