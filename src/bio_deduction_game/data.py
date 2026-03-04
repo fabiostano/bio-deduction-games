@@ -351,6 +351,12 @@ class OpenSignalsLSLProvider(DataProvider):
                     eda_idx_override = None
 
         for a in self.assignments:
+            # Single-signal OpenSignals layout ([counter, signal]) represents one
+            # physical channel only. In that case map data to slot-1 players only
+            # (CH1 on each hub mapping) and skip higher slots.
+            if ecg_idx_override is not None and a.channel_ekg != 1:
+                continue
+
             i_ecg = ecg_idx_override if ecg_idx_override is not None else (a.channel_ekg - 1)
             if eda_idx_override is not None:
                 i_eda = eda_idx_override
