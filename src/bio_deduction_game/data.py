@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from threading import Lock, Thread
 from typing import Callable, Dict, List, Optional
-import math
 import random
 import time
 
@@ -205,6 +204,143 @@ class LiveHubProvider(DataProvider):
                             getattr(device, m)()
                         except Exception:
                             pass
+
+    def _estimate_hr(self, player: str, ecg: float, ts: float) -> float:
+        prev = self._last_ecg.get(player, ecg)
+        self._last_ecg[player] = ecg
+
+        threshold = 0.65 * max(1.0, abs(prev))
+        rising = ecg > threshold and prev <= threshold
+
+        if rising:
+            last_peak = self._last_peak_ts.get(player)
+            if last_peak is not None:
+                rr = ts - last_peak
+                if 0.35 <= rr <= 1.5:
+                    inst_hr = 60.0 / rr
+                    old = self._hr.get(player, inst_hr)
+                    self._hr[player] = old * 0.7 + inst_hr * 0.3
+            self._last_peak_ts[player] = ts
+
+        return self._hr.get(player, 0.0)
+
+    def get_samples(self) -> Dict[str, Sample]:
+        with self._lock:
+            return dict(self._samples)
+
+    def close(self) -> None:
+        self._stop = True
+        if self._worker and self._worker.is_alive():
+            self._worker.join(timeout=1.5)
+
+
+class OpenSignalsLSLProvider(DataProvider):
+    """Live provider consuming OpenSignals streams via LSL (pylsl)."""
+
+    source_name = "Live Data (OpenSignals LSL)"
+
+    def __init__(self, assignments: List[PlayerAssignment]) -> None:
+        self.assignments = assignments
+        self._samples: Dict[str, Sample] = {}
+        self._lock = Lock()
+
+        self._last_ecg: Dict[str, float] = {}
+        self._last_peak_ts: Dict[str, float] = {}
+        self._hr: Dict[str, float] = {}
+
+        self._stop = False
+        self._worker: Optional[Thread] = None
+
+        self._backend_name = "none"
+        self.status = "idle"
+        self._start_worker()
+
+    @property
+    def backend_name(self) -> str:
+        return self._backend_name
+
+    def _start_worker(self) -> None:
+        self._worker = Thread(target=self._run_worker, daemon=True)
+        self._worker.start()
+
+    def _run_worker(self) -> None:
+        try:
+            import pylsl  # type: ignore
+
+            self._backend_name = "pylsl"
+        except Exception:
+            self._backend_name = "none"
+            self.status = "pylsl not installed"
+            return
+
+        self.status = "searching LSL stream"
+
+        streams = []
+        try:
+            streams = pylsl.resolve_byprop("name", "OpenSignals", timeout=2)
+        except Exception:
+            streams = []
+
+        if not streams:
+            try:
+                streams = pylsl.resolve_streams(wait_time=2)
+            except Exception:
+                streams = []
+
+        if not streams:
+            self.status = "no LSL streams found"
+            return
+
+        selected = streams[0]
+        for s in streams:
+            try:
+                name = (s.name() or "").lower()
+                stype = (s.type() or "").lower()
+                if "opensignals" in name or "biosignal" in stype or "ecg" in stype:
+                    selected = s
+                    break
+            except Exception:
+                continue
+
+        try:
+            inlet = pylsl.StreamInlet(selected, max_buflen=10)
+        except Exception as e:
+            self.status = f"failed to open LSL inlet: {e}"
+            return
+
+        try:
+            self.status = f"streaming LSL: {selected.name()}"
+        except Exception:
+            self.status = "streaming LSL"
+
+        while not self._stop:
+            try:
+                chunk, ts = inlet.pull_chunk(timeout=0.2, max_samples=64)
+            except Exception as e:
+                self.status = f"LSL read error: {e}"
+                time.sleep(0.2)
+                continue
+
+            if not chunk:
+                continue
+
+            for analog, t in zip(chunk, ts):
+                now = float(t) if t else time.time()
+                self._consume_frame([float(x) for x in analog], now)
+
+    def _consume_frame(self, analog: List[float], now: float) -> None:
+        for a in self.assignments:
+            i_ecg = a.channel_ekg - 1
+            i_eda = a.channel_eda - 1
+            if i_ecg >= len(analog):
+                continue
+
+            ecg = float(analog[i_ecg])
+            eda = float(analog[i_eda]) if i_eda < len(analog) else 0.0
+            hr = self._estimate_hr(a.player_name, ecg, now)
+
+            with self._lock:
+                self._samples[a.player_name] = Sample(t=now, hr=hr, eda=eda)
 
     def _estimate_hr(self, player: str, ecg: float, ts: float) -> float:
         prev = self._last_ecg.get(player, ecg)

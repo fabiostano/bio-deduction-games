@@ -34,15 +34,26 @@ python -m bio_deduction_game
 ```
 
 ## Live Data (OpenSignals/BioPlux)
-- Select **Live Data** in the start menu.
-- Use **Hubs erkennen** or enter MACs manually.
-- Mapping preview shows fixed channel assignment:
-  - CH1/2 = Player1 EKG/EDA
-  - CH3/4 = Player2 EKG/EDA
-  - CH5/6 = Player3 EKG/EDA
-  - CH7/8 = Player4 EKG/EDA
+Two live backends are available:
 
-The app no longer hard-depends on `biosignalsplux` via pip because some environments do not provide a public wheel on PyPI. Install your OpenSignals/BioPlux Python package manually (vendor wheel/SDK) on the target machine for Live mode.
+1. **Direct Hub (MAC)**
+   - Select **Live Data** + backend **Direct Hub (MAC)**
+   - Use **Hubs erkennen** or enter MACs manually.
+   - Requires `biosignalsplux` installed from vendor SDK/wheel.
+
+2. **OpenSignals Stream (LSL)**
+   - Select **Live Data** + backend **OpenSignals Stream (LSL)**
+   - Start streaming from OpenSignals to LSL on the same machine.
+   - No manual MAC entry needed.
+   - Uses `pylsl` in Python.
+
+Mapping preview uses fixed channel assignment:
+- CH1/2 = Player1 EKG/EDA
+- CH3/4 = Player2 EKG/EDA
+- CH5/6 = Player3 EKG/EDA
+- CH7/8 = Player4 EKG/EDA
+
+The direct-hub path no longer hard-depends on `biosignalsplux` via pip because some environments do not provide a public wheel on PyPI. Install your OpenSignals/BioPlux Python package manually (vendor wheel/SDK) on the target machine when using Direct Hub mode.
 
 > Note: biosignalsplux APIs vary by version. The connector is implemented with runtime compatibility fallbacks; if your local stack differs, we can adapt quickly based on your error log.
 

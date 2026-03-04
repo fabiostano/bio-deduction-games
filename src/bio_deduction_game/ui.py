@@ -30,6 +30,7 @@ from .data import (
     DataProvider,
     LiveHubProvider,
     MockProvider,
+    OpenSignalsLSLProvider,
     build_assignments,
     discover_connected_hubs,
 )
@@ -170,11 +171,22 @@ class StartScreen(QWidget):
         self.source_group = QButtonGroup(self)
         self.source_group.addButton(self.mock_radio)
         self.source_group.addButton(self.live_radio)
+        self.mock_radio.toggled.connect(self._refresh_limits)
+        self.live_radio.toggled.connect(self._refresh_limits)
 
         data_row.addWidget(self.mock_radio)
         data_row.addWidget(self.live_radio)
         data_row.addStretch(1)
         panel_layout.addLayout(data_row)
+
+        backend_row = QHBoxLayout()
+        backend_row.addWidget(QLabel("Live-Backend:"))
+        self.live_backend_combo = QComboBox()
+        self.live_backend_combo.addItems(["Direct Hub (MAC)", "OpenSignals Stream (LSL)"])
+        self.live_backend_combo.currentTextChanged.connect(self._refresh_limits)
+        backend_row.addWidget(self.live_backend_combo)
+        backend_row.addStretch(1)
+        panel_layout.addLayout(backend_row)
 
         hubs_title = QLabel("Hubs (MAC-Adressen)")
         hubs_title.setObjectName("sectionTitle")
@@ -248,6 +260,9 @@ class StartScreen(QWidget):
         self.add_player_field("Player 1")
         self._refresh_limits()
 
+    def _live_uses_lsl(self) -> bool:
+        return self.live_radio.isChecked() and self.live_backend_combo.currentText().startswith("OpenSignals")
+
     def _parse_manual_hubs(self) -> List[str]:
         raw = self.manual_hubs_edit.text().strip()
         if not raw:
@@ -267,8 +282,17 @@ class StartScreen(QWidget):
         self._refresh_limits()
 
     def _refresh_limits(self) -> None:
-        hub_count = max(1, min(2, len(self._active_hubs()) or 1))
-        self._max_players = 4 if hub_count == 1 else 8
+        if self._live_uses_lsl():
+            hub_count = 1
+            self._max_players = 4
+            self.detect_hubs_btn.setEnabled(False)
+            self.manual_hubs_edit.setEnabled(False)
+            self.connected_hubs_lbl.setText("LSL-Modus: Hub-Erkennung nicht nötig")
+        else:
+            hub_count = max(1, min(2, len(self._active_hubs()) or 1))
+            self._max_players = 4 if hub_count == 1 else 8
+            self.detect_hubs_btn.setEnabled(True)
+            self.manual_hubs_edit.setEnabled(True)
 
         self.max_players_lbl.setText(f"Aktuell max. {self._max_players} Spieler ({hub_count} Hub(s))")
 
@@ -303,7 +327,10 @@ class StartScreen(QWidget):
     def _update_mapping_preview(self) -> None:
         hubs = self._active_hubs()
         players = self._effective_players()
-        if not hubs:
+
+        if self._live_uses_lsl():
+            hubs = ["LSL"]
+        elif not hubs:
             self.mapping_lbl.setText("Keine Hub-MAC vorhanden. Für Live: Hubs erkennen oder manuell eintragen.")
             return
 
@@ -319,12 +346,13 @@ class StartScreen(QWidget):
             )
         self.mapping_lbl.setText("\n".join(lines))
 
-    def get_config(self) -> Tuple[str, str, List[str], List[str]]:
+    def get_config(self) -> Tuple[str, str, List[str], List[str], str]:
         mode = self.mode_combo.currentText()
         source = "live" if self.live_radio.isChecked() else "mock"
         players = self._effective_players()
-        hubs = self._active_hubs()
-        return mode, source, players, hubs
+        live_backend = "lsl" if self._live_uses_lsl() else "direct"
+        hubs = ["LSL"] if live_backend == "lsl" else self._active_hubs()
+        return mode, source, players, hubs, live_backend
 
 
 class DashboardScreen(QWidget):
@@ -374,7 +402,7 @@ class DashboardScreen(QWidget):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._tick)
 
-    def start(self, mode: str, source: str, players: List[str], hubs: List[str]) -> None:
+    def start(self, mode: str, source: str, players: List[str], hubs: List[str], live_backend: str = "direct") -> None:
         self.timer.stop()
         self._clear_grid()
         self._clear_elim_bar()
@@ -390,10 +418,16 @@ class DashboardScreen(QWidget):
             self.provider = MockProvider(players)
             source_text = "Mock Data"
         else:
-            self.provider = LiveHubProvider(assignments)
-            backend = self.provider.backend_name if isinstance(self.provider, LiveHubProvider) else "unknown"
-            details = self.provider.status if isinstance(self.provider, LiveHubProvider) else ""
-            source_text = f"Live Data ({backend}) {details}".strip()
+            if live_backend == "lsl":
+                self.provider = OpenSignalsLSLProvider(assignments)
+                backend = self.provider.backend_name if isinstance(self.provider, OpenSignalsLSLProvider) else "unknown"
+                details = self.provider.status if isinstance(self.provider, OpenSignalsLSLProvider) else ""
+                source_text = f"Live Data via OpenSignals LSL ({backend}) {details}".strip()
+            else:
+                self.provider = LiveHubProvider(assignments)
+                backend = self.provider.backend_name if isinstance(self.provider, LiveHubProvider) else "unknown"
+                details = self.provider.status if isinstance(self.provider, LiveHubProvider) else ""
+                source_text = f"Live Data Direct Hub ({backend}) {details}".strip()
 
         self.subtitle.setText(f"{mode} Mode • Live HR + EDA")
         self.status.setText(f"Data source: {source_text}")
@@ -462,6 +496,9 @@ class DashboardScreen(QWidget):
     def _tick(self) -> None:
         if self.provider is None:
             return
+
+        if isinstance(self.provider, (LiveHubProvider, OpenSignalsLSLProvider)):
+            self.status.setText(f"Data source: {self.provider.source_name} • {self.provider.status}")
 
         samples = self.provider.get_samples()
 
@@ -599,12 +636,12 @@ class MainWindow(QMainWindow):
         )
 
     def _start_game(self) -> None:
-        mode, source, players, hubs = self.start_screen.get_config()
+        mode, source, players, hubs, live_backend = self.start_screen.get_config()
         if not players:
             QMessageBox.warning(self, "Fehlende Spieler", "Bitte mindestens einen Spieler anlegen.")
             return
 
-        if len(players) > 4 and len(hubs) < 2:
+        if source == "live" and live_backend == "direct" and len(players) > 4 and len(hubs) < 2:
             QMessageBox.warning(
                 self,
                 "Zu viele Spieler",
@@ -612,7 +649,7 @@ class MainWindow(QMainWindow):
             )
             return
 
-        self.dashboard.start(mode, source, players, hubs)
+        self.dashboard.start(mode, source, players, hubs, live_backend)
         self.stack.setCurrentWidget(self.dashboard)
 
     def _back_to_start(self) -> None:
