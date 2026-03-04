@@ -247,6 +247,7 @@ class OpenSignalsLSLProvider(DataProvider):
         self._last_ecg: Dict[str, float] = {}
         self._last_peak_ts: Dict[str, float] = {}
         self._hr: Dict[str, float] = {}
+        self._last_counter: Optional[float] = None
 
         self._stop = False
         self._worker: Optional[Thread] = None
@@ -329,14 +330,35 @@ class OpenSignalsLSLProvider(DataProvider):
                 self._consume_frame([float(x) for x in analog], now)
 
     def _consume_frame(self, analog: List[float], now: float) -> None:
+        if not analog:
+            return
+
+        # OpenSignals LSL often sends [counter, signal] for single-channel streams.
+        # Detect this layout and map ECG to channel 2 while forcing EDA to 0.
+        ecg_idx_override: Optional[int] = None
+        eda_idx_override: Optional[int] = None
+
+        if len(analog) == 2:
+            first = float(analog[0])
+            second = float(analog[1])
+            if self._last_counter is None:
+                self._last_counter = first
+            else:
+                delta = first - self._last_counter
+                self._last_counter = first
+                if 0.5 <= delta <= 5.0 and abs(second) < 20_000:
+                    ecg_idx_override = 1
+                    eda_idx_override = None
+
         for a in self.assignments:
-            i_ecg = a.channel_ekg - 1
-            i_eda = a.channel_eda - 1
+            i_ecg = ecg_idx_override if ecg_idx_override is not None else (a.channel_ekg - 1)
+            i_eda = eda_idx_override if eda_idx_override is not None else (a.channel_eda - 1)
+
             if i_ecg >= len(analog):
                 continue
 
             ecg = float(analog[i_ecg])
-            eda = float(analog[i_eda]) if i_eda < len(analog) else 0.0
+            eda = float(analog[i_eda]) if i_eda is not None and i_eda < len(analog) else 0.0
             hr = self._estimate_hr(a.player_name, ecg, now)
 
             with self._lock:
