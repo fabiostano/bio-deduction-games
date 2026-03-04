@@ -1,0 +1,11 @@
+README.md
+pyproject.toml
+src/bio_deduction_game/__init__.py
+src/bio_deduction_game/__main__.py
+src/bio_deduction_game/data.py
+src/bio_deduction_game/ui.py
+src/bio_deduction_games.egg-info/PKG-INFO
+src/bio_deduction_games.egg-info/SOURCES.txt
+src/bio_deduction_games.egg-info/dependency_links.txt
+src/bio_deduction_games.egg-info/requires.txt
+src/bio_deduction_games.egg-info/top_level.txt

@@ -1,0 +1,8 @@
+Metadata-Version: 2.4
+Name: bio-deduction-games
+Version: 0.1.0
+Summary: Generic biosignal companion UI for social deduction games
+Requires-Python: >=3.11
+Requires-Dist: PySide6>=6.7
+Requires-Dist: pyqtgraph>=0.13
+Requires-Dist: numpy>=1.26
