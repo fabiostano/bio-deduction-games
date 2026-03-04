@@ -188,6 +188,15 @@ class StartScreen(QWidget):
         backend_row.addStretch(1)
         panel_layout.addLayout(backend_row)
 
+        signal_row = QHBoxLayout()
+        signal_row.addWidget(QLabel("Signalmodus:"))
+        self.signal_mode_combo = QComboBox()
+        self.signal_mode_combo.addItems(["ECG + EDA", "ECG only"])
+        self.signal_mode_combo.currentTextChanged.connect(self._update_mapping_preview)
+        signal_row.addWidget(self.signal_mode_combo)
+        signal_row.addStretch(1)
+        panel_layout.addLayout(signal_row)
+
         hubs_title = QLabel("Hubs (MAC-Adressen)")
         hubs_title.setObjectName("sectionTitle")
         panel_layout.addWidget(hubs_title)
@@ -263,6 +272,9 @@ class StartScreen(QWidget):
     def _live_uses_lsl(self) -> bool:
         return self.live_radio.isChecked() and self.live_backend_combo.currentText().startswith("OpenSignals")
 
+    def _include_eda(self) -> bool:
+        return self.signal_mode_combo.currentText().startswith("ECG + EDA")
+
     def _parse_manual_hubs(self) -> List[str]:
         raw = self.manual_hubs_edit.text().strip()
         if not raw:
@@ -334,25 +346,31 @@ class StartScreen(QWidget):
             self.mapping_lbl.setText("Keine Hub-MAC vorhanden. Für Live: Hubs erkennen oder manuell eintragen.")
             return
 
-        assignments = build_assignments(players, hubs)
+        assignments = build_assignments(players, hubs, include_eda=self._include_eda())
         if not assignments:
             self.mapping_lbl.setText("Kein Mapping verfügbar.")
             return
 
         lines = []
         for a in assignments:
-            lines.append(
-                f"{a.player_name} → {a.hub_mac} | CH{a.channel_ekg}=EKG, CH{a.channel_eda}=EDA"
-            )
+            if a.channel_eda > 0:
+                lines.append(
+                    f"{a.player_name} → {a.hub_mac} | CH{a.channel_ekg}=EKG, CH{a.channel_eda}=EDA"
+                )
+            else:
+                lines.append(
+                    f"{a.player_name} → {a.hub_mac} | CH{a.channel_ekg}=EKG, EDA übersprungen"
+                )
         self.mapping_lbl.setText("\n".join(lines))
 
-    def get_config(self) -> Tuple[str, str, List[str], List[str], str]:
+    def get_config(self) -> Tuple[str, str, List[str], List[str], str, bool]:
         mode = self.mode_combo.currentText()
         source = "live" if self.live_radio.isChecked() else "mock"
         players = self._effective_players()
         live_backend = "lsl" if self._live_uses_lsl() else "direct"
         hubs = ["LSL"] if live_backend == "lsl" else self._active_hubs()
-        return mode, source, players, hubs, live_backend
+        include_eda = self._include_eda()
+        return mode, source, players, hubs, live_backend, include_eda
 
 
 class DashboardScreen(QWidget):
@@ -402,14 +420,22 @@ class DashboardScreen(QWidget):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._tick)
 
-    def start(self, mode: str, source: str, players: List[str], hubs: List[str], live_backend: str = "direct") -> None:
+    def start(
+        self,
+        mode: str,
+        source: str,
+        players: List[str],
+        hubs: List[str],
+        live_backend: str = "direct",
+        include_eda: bool = True,
+    ) -> None:
         self.timer.stop()
         self._clear_grid()
         self._clear_elim_bar()
         self.hidden_players = set()
 
         self.players = players
-        assignments = build_assignments(players, hubs)
+        assignments = build_assignments(players, hubs, include_eda=include_eda)
 
         if self.provider is not None:
             self.provider.close()
@@ -429,7 +455,8 @@ class DashboardScreen(QWidget):
                 details = self.provider.status if isinstance(self.provider, LiveHubProvider) else ""
                 source_text = f"Live Data Direct Hub ({backend}) {details}".strip()
 
-        self.subtitle.setText(f"{mode} Mode • Live HR + EDA")
+        signal_text = "HR + EDA" if include_eda else "HR (ECG only)"
+        self.subtitle.setText(f"{mode} Mode • {signal_text}")
         self.status.setText(f"Data source: {source_text}")
 
         self.buffers = {
@@ -636,7 +663,7 @@ class MainWindow(QMainWindow):
         )
 
     def _start_game(self) -> None:
-        mode, source, players, hubs, live_backend = self.start_screen.get_config()
+        mode, source, players, hubs, live_backend, include_eda = self.start_screen.get_config()
         if not players:
             QMessageBox.warning(self, "Fehlende Spieler", "Bitte mindestens einen Spieler anlegen.")
             return
@@ -649,7 +676,7 @@ class MainWindow(QMainWindow):
             )
             return
 
-        self.dashboard.start(mode, source, players, hubs, live_backend)
+        self.dashboard.start(mode, source, players, hubs, live_backend, include_eda)
         self.stack.setCurrentWidget(self.dashboard)
 
     def _back_to_start(self) -> None:

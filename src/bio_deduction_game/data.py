@@ -147,12 +147,12 @@ class LiveHubProvider(DataProvider):
             now = time.time()
             for a in assignments:
                 i_ecg = a.channel_ekg - 1
-                i_eda = a.channel_eda - 1
-                if i_ecg >= len(analog) or i_eda >= len(analog):
+                i_eda = a.channel_eda - 1 if a.channel_eda > 0 else None
+                if i_ecg >= len(analog):
                     continue
 
                 ecg = float(analog[i_ecg])
-                eda = float(analog[i_eda])
+                eda = float(analog[i_eda]) if i_eda is not None and i_eda < len(analog) else 0.0
                 hr = self._estimate_hr(a.player_name, ecg, now)
 
                 with self._lock:
@@ -352,7 +352,12 @@ class OpenSignalsLSLProvider(DataProvider):
 
         for a in self.assignments:
             i_ecg = ecg_idx_override if ecg_idx_override is not None else (a.channel_ekg - 1)
-            i_eda = eda_idx_override if eda_idx_override is not None else (a.channel_eda - 1)
+            if eda_idx_override is not None:
+                i_eda = eda_idx_override
+            elif a.channel_eda > 0:
+                i_eda = a.channel_eda - 1
+            else:
+                i_eda = None
 
             if i_ecg >= len(analog):
                 continue
@@ -429,7 +434,7 @@ def discover_connected_hubs() -> List[str]:
     return []
 
 
-def build_assignments(players: List[str], hub_macs: List[str]) -> List[PlayerAssignment]:
+def build_assignments(players: List[str], hub_macs: List[str], include_eda: bool = True) -> List[PlayerAssignment]:
     hubs = [h.strip() for h in hub_macs if h.strip()][:2]
     if not hubs:
         return []
@@ -448,7 +453,7 @@ def build_assignments(players: List[str], hub_macs: List[str]) -> List[PlayerAss
                 player_name=player,
                 hub_mac=hub,
                 channel_ekg=slot * 2 + 1,
-                channel_eda=slot * 2 + 2,
+                channel_eda=(slot * 2 + 2) if include_eda else 0,
             )
         )
         per_hub[hub] += 1
