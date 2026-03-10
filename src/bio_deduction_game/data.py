@@ -247,7 +247,6 @@ class OpenSignalsLSLProvider(DataProvider):
         self._last_ecg: Dict[str, float] = {}
         self._last_peak_ts: Dict[str, float] = {}
         self._hr: Dict[str, float] = {}
-        self._last_counter: Optional[float] = None
 
         self._stop = False
         self._worker: Optional[Thread] = None
@@ -264,6 +263,40 @@ class OpenSignalsLSLProvider(DataProvider):
         self._worker = Thread(target=self._run_worker, daemon=True)
         self._worker.start()
 
+    def _stream_score(self, stream) -> int:
+        try:
+            name = (stream.name() or "").lower()
+        except Exception:
+            name = ""
+        try:
+            stype = (stream.type() or "").lower()
+        except Exception:
+            stype = ""
+
+        score = 0
+        if "opensignals" in name:
+            score += 5
+        if "bio" in stype:
+            score += 3
+        if "ecg" in stype:
+            score += 2
+        return score
+
+    def _stream_label(self, stream) -> str:
+        bits: List[str] = []
+        for getter in ("name", "type", "source_id"):
+            fn = getattr(stream, getter, None)
+            if callable(fn):
+                try:
+                    v = fn()
+                    if v:
+                        bits.append(str(v))
+                except Exception:
+                    pass
+        if not bits:
+            return "unknown-stream"
+        return " / ".join(bits)
+
     def _run_worker(self) -> None:
         try:
             import pylsl  # type: ignore
@@ -274,7 +307,7 @@ class OpenSignalsLSLProvider(DataProvider):
             self.status = "pylsl not installed"
             return
 
-        self.status = "searching LSL stream"
+        self.status = "searching LSL streams"
 
         streams = []
         try:
@@ -292,78 +325,118 @@ class OpenSignalsLSLProvider(DataProvider):
             self.status = "no LSL streams found"
             return
 
-        selected = streams[0]
-        for s in streams:
-            try:
-                name = (s.name() or "").lower()
-                stype = (s.type() or "").lower()
-                if "opensignals" in name or "biosignal" in stype or "ecg" in stype:
-                    selected = s
-                    break
-            except Exception:
-                continue
+        ranked = sorted(streams, key=self._stream_score, reverse=True)
 
-        try:
-            inlet = pylsl.StreamInlet(selected, max_buflen=10)
-        except Exception as e:
-            self.status = f"failed to open LSL inlet: {e}"
+        max_channel_needed = 0
+        for a in self.assignments:
+            max_channel_needed = max(max_channel_needed, a.channel_ekg, a.channel_eda)
+
+        combined = None
+        for s in ranked:
+            try:
+                ch = int(s.channel_count())
+            except Exception:
+                ch = 0
+            if ch >= max_channel_needed and max_channel_needed > 0:
+                combined = s
+                break
+
+        if combined is not None:
+            try:
+                inlet = pylsl.StreamInlet(combined, max_buflen=10)
+            except Exception as e:
+                self.status = f"failed to open LSL inlet: {e}"
+                return
+
+            self.status = f"streaming combined LSL: {self._stream_label(combined)}"
+
+            while not self._stop:
+                try:
+                    chunk, ts = inlet.pull_chunk(timeout=0.2, max_samples=64)
+                except Exception as e:
+                    self.status = f"LSL read error: {e}"
+                    time.sleep(0.2)
+                    continue
+
+                if not chunk:
+                    continue
+
+                for analog, t in zip(chunk, ts):
+                    now = float(t) if t else time.time()
+                    self._consume_combined_frame([float(x) for x in analog], now)
             return
 
-        try:
-            self.status = f"streaming LSL: {selected.name()}"
-        except Exception:
-            self.status = "streaming LSL"
+        # Fallback: map one LSL stream per player assignment (single-channel mode).
+        player_assignments = list(self.assignments)
+        if not player_assignments:
+            self.status = "no player assignments"
+            return
+
+        usable = []
+        for s in ranked:
+            try:
+                ch = int(s.channel_count())
+            except Exception:
+                ch = 0
+            if ch in (1, 2):
+                usable.append(s)
+
+        if len(usable) < len(player_assignments):
+            self.status = (
+                f"found {len(usable)} single-channel stream(s), need {len(player_assignments)}"
+            )
+            return
+
+        inlets = []
+        mapped_labels: List[str] = []
+        for a, s in zip(player_assignments, usable):
+            try:
+                inlet = pylsl.StreamInlet(s, max_buflen=10)
+            except Exception as e:
+                self.status = f"failed to open stream for {a.player_name}: {e}"
+                return
+            inlets.append((a, inlet, s))
+            mapped_labels.append(f"{a.player_name}←{self._stream_label(s)}")
+
+        self.status = "streaming per-player LSL: " + " | ".join(mapped_labels)
 
         while not self._stop:
-            try:
-                chunk, ts = inlet.pull_chunk(timeout=0.2, max_samples=64)
-            except Exception as e:
-                self.status = f"LSL read error: {e}"
-                time.sleep(0.2)
-                continue
+            had_data = False
+            for a, inlet, _s in inlets:
+                try:
+                    chunk, ts = inlet.pull_chunk(timeout=0.0, max_samples=32)
+                except Exception:
+                    continue
 
-            if not chunk:
-                continue
+                if not chunk:
+                    continue
 
-            for analog, t in zip(chunk, ts):
-                now = float(t) if t else time.time()
-                self._consume_frame([float(x) for x in analog], now)
+                had_data = True
+                for analog, t in zip(chunk, ts):
+                    now = float(t) if t else time.time()
+                    self._consume_single_stream_frame(a, [float(x) for x in analog], now)
 
-    def _consume_frame(self, analog: List[float], now: float) -> None:
+            if not had_data:
+                time.sleep(0.02)
+
+    def _consume_single_stream_frame(self, assignment: PlayerAssignment, analog: List[float], now: float) -> None:
         if not analog:
             return
 
-        # OpenSignals LSL often sends [counter, signal] for single-channel streams.
-        # Detect this layout and map ECG to channel 2 while forcing EDA to 0.
-        ecg_idx_override: Optional[int] = None
-        eda_idx_override: Optional[int] = None
+        # OpenSignals single-channel LSL is commonly [counter, signal].
+        ecg = float(analog[-1])
+        hr = self._estimate_hr(assignment.player_name, ecg, now)
 
-        if len(analog) == 2:
-            first = float(analog[0])
-            second = float(analog[1])
-            if self._last_counter is None:
-                self._last_counter = first
-            else:
-                delta = first - self._last_counter
-                self._last_counter = first
-                if 0.5 <= delta <= 5.0 and abs(second) < 20_000:
-                    ecg_idx_override = 1
-                    eda_idx_override = None
+        with self._lock:
+            self._samples[assignment.player_name] = Sample(t=now, hr=hr, eda=0.0)
+
+    def _consume_combined_frame(self, analog: List[float], now: float) -> None:
+        if not analog:
+            return
 
         for a in self.assignments:
-            # Single-signal OpenSignals layout ([counter, signal]) represents one
-            # physical channel only. In that case map data to slot-1 players only
-            # (CH1 on each hub mapping) and skip higher slots.
-            if ecg_idx_override is not None and a.channel_ekg != 1:
-                continue
-
-            i_ecg = ecg_idx_override if ecg_idx_override is not None else (a.channel_ekg - 1)
-            if eda_idx_override is not None:
-                i_eda = eda_idx_override
-            elif a.channel_eda > 0:
-                i_eda = a.channel_eda - 1
-            else:
-                i_eda = None
+            i_ecg = a.channel_ekg - 1
+            i_eda = a.channel_eda - 1 if a.channel_eda > 0 else None
 
             if i_ecg >= len(analog):
                 continue
