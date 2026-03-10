@@ -248,6 +248,12 @@ class OpenSignalsLSLProvider(DataProvider):
         self._last_peak_ts: Dict[str, float] = {}
         self._hr: Dict[str, float] = {}
 
+        self._counter_prev: Optional[float] = None
+        self._counter_seen = 0
+        self._counter_inc_hits = 0
+        self._combined_channel_offset = 0
+        self._counter_detection_locked = False
+
         self._stop = False
         self._worker: Optional[Thread] = None
 
@@ -430,13 +436,41 @@ class OpenSignalsLSLProvider(DataProvider):
         with self._lock:
             self._samples[assignment.player_name] = Sample(t=now, hr=hr, eda=0.0)
 
+    def _detect_combined_counter_offset(self, analog: List[float]) -> int:
+        if self._counter_detection_locked:
+            return self._combined_channel_offset
+
+        if len(analog) < 2:
+            return 0
+
+        first = float(analog[0])
+        second = float(analog[1])
+
+        if self._counter_prev is not None:
+            delta = first - self._counter_prev
+            self._counter_seen += 1
+            if 0.8 <= delta <= 1.2:
+                self._counter_inc_hits += 1
+        self._counter_prev = first
+
+        if self._counter_seen >= 100:
+            ratio = self._counter_inc_hits / max(1, self._counter_seen)
+            if ratio >= 0.9 and abs(second) < 200_000:
+                self._combined_channel_offset = 1
+                self.status = f"{self.status} • counter channel detected (+1 offset)"
+            self._counter_detection_locked = True
+
+        return self._combined_channel_offset
+
     def _consume_combined_frame(self, analog: List[float], now: float) -> None:
         if not analog:
             return
 
+        offset = self._detect_combined_counter_offset(analog)
+
         for a in self.assignments:
-            i_ecg = a.channel_ekg - 1
-            i_eda = a.channel_eda - 1 if a.channel_eda > 0 else None
+            i_ecg = (a.channel_ekg - 1) + offset
+            i_eda = ((a.channel_eda - 1) + offset) if a.channel_eda > 0 else None
 
             if i_ecg >= len(analog):
                 continue
