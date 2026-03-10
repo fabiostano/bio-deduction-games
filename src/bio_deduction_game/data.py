@@ -662,12 +662,21 @@ def build_assignments(players: List[str], hub_macs: List[str], include_eda: bool
         if slot >= 4:
             continue
 
+        if include_eda:
+            ch_ecg = slot * 2 + 1
+            ch_eda = slot * 2 + 2
+        else:
+            # ECG-only mode: consume channels sequentially (CH1..CH4 per hub)
+            # instead of skipping every second channel.
+            ch_ecg = slot + 1
+            ch_eda = 0
+
         assignments.append(
             PlayerAssignment(
                 player_name=player,
                 hub_mac=hub,
-                channel_ekg=slot * 2 + 1,
-                channel_eda=(slot * 2 + 2) if include_eda else 0,
+                channel_ekg=ch_ecg,
+                channel_eda=ch_eda,
             )
         )
         per_hub[hub] += 1

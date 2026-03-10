@@ -52,10 +52,11 @@ class PlayerBuffer:
 class PlayerCard(QFrame):
     clicked = Signal(str)
 
-    def __init__(self, player_id: str, accent: str) -> None:
+    def __init__(self, player_id: str, accent: str, show_eda: bool = True) -> None:
         super().__init__()
         self.player_id = player_id
         self.accent = accent
+        self.show_eda = show_eda
         self.setObjectName("playerCard")
 
         root = QVBoxLayout(self)
@@ -86,21 +87,23 @@ class PlayerCard(QFrame):
         root.addLayout(top)
 
         self.hr_plot = pg.PlotWidget()
-        self.eda_plot = pg.PlotWidget()
-
         self._style_plot(self.hr_plot, "HR")
-        self._style_plot(self.eda_plot, "EDA")
 
         hr_color = QColor(accent)
         hr_color.setAlphaF(0.8)
-        eda_color = QColor(accent)
-        eda_color.setAlphaF(0.6)
-
         self.hr_curve = self.hr_plot.plot(pen=pg.mkPen(color=hr_color, width=2))
-        self.eda_curve = self.eda_plot.plot(pen=pg.mkPen(color=eda_color, width=2))
 
         root.addWidget(self.hr_plot)
-        root.addWidget(self.eda_plot)
+
+        self.eda_plot = None
+        self.eda_curve = None
+        if self.show_eda:
+            self.eda_plot = pg.PlotWidget()
+            self._style_plot(self.eda_plot, "EDA")
+            eda_color = QColor(accent)
+            eda_color.setAlphaF(0.6)
+            self.eda_curve = self.eda_plot.plot(pen=pg.mkPen(color=eda_color, width=2))
+            root.addWidget(self.eda_plot)
 
         self._pulse_on = True
         self._pulse_timer = QTimer(self)
@@ -150,7 +153,8 @@ class PlayerCard(QFrame):
             self._pulse_timer.setInterval(interval)
 
         self.hr_curve.setData(x_sec, hrs)
-        self.eda_curve.setData(x_sec, edas)
+        if self.show_eda and self.eda_curve is not None:
+            self.eda_curve.setData(x_sec, edas)
 
 
 class StartScreen(QWidget):
@@ -472,6 +476,7 @@ class DashboardScreen(QWidget):
         self.provider: DataProvider | None = None
         self.players: List[str] = []
         self.cards: Dict[str, PlayerCard] = {}
+        self.show_eda = True
         self.buffers: Dict[str, PlayerBuffer] = {}
         self.hidden_players: set[str] = set()
 
@@ -530,6 +535,7 @@ class DashboardScreen(QWidget):
         self.hidden_players = set()
 
         self.players = players
+        self.show_eda = include_eda and not lsl_debug
         assignments = build_assignments(players, hubs, include_eda=include_eda)
 
         if self.provider is not None:
@@ -578,7 +584,7 @@ class DashboardScreen(QWidget):
 
         idx = len(self.cards)
         accent = self._palette[idx % len(self._palette)]
-        card = PlayerCard(player, accent)
+        card = PlayerCard(player, accent, show_eda=self.show_eda)
         card.clicked.connect(self._eliminate_player)
         self.cards[player] = card
 
