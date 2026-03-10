@@ -10,6 +10,7 @@ from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
+    QCheckBox,
     QComboBox,
     QFrame,
     QGraphicsOpacityEffect,
@@ -31,6 +32,7 @@ from .data import (
     DataProvider,
     LiveHubProvider,
     MockProvider,
+    OpenSignalsLSLDebugProvider,
     OpenSignalsLSLProvider,
     build_assignments,
     discover_connected_hubs,
@@ -209,6 +211,13 @@ class StartScreen(QWidget):
         backend_row.addStretch(1)
         panel_layout.addLayout(backend_row)
 
+        lsl_debug_row = QHBoxLayout()
+        self.lsl_debug_checkbox = QCheckBox("LSL Debug-Modus (alle empfangenen Zeitreihen plotten)")
+        self.lsl_debug_checkbox.toggled.connect(self._refresh_limits)
+        lsl_debug_row.addWidget(self.lsl_debug_checkbox)
+        lsl_debug_row.addStretch(1)
+        panel_layout.addLayout(lsl_debug_row)
+
         signal_row = QHBoxLayout()
         signal_row.addWidget(QLabel("Signalmodus:"))
         self.signal_mode_combo = QComboBox()
@@ -309,6 +318,9 @@ class StartScreen(QWidget):
     def _include_eda(self) -> bool:
         return self.signal_mode_combo.currentText().startswith("ECG + EDA")
 
+    def _lsl_debug_enabled(self) -> bool:
+        return self._live_uses_lsl() and self.lsl_debug_checkbox.isChecked()
+
     def _parse_manual_hubs(self) -> List[str]:
         raw = self.manual_hubs_edit.text().strip()
         if not raw:
@@ -334,10 +346,13 @@ class StartScreen(QWidget):
         if self._live_uses_lsl():
             self.detect_hubs_btn.setEnabled(False)
             self.manual_hubs_edit.setEnabled(False)
+            self.lsl_debug_checkbox.setEnabled(True)
             self.connected_hubs_lbl.setText("LSL-Modus: Hub-Erkennung nicht nötig")
         else:
             self.detect_hubs_btn.setEnabled(True)
             self.manual_hubs_edit.setEnabled(True)
+            self.lsl_debug_checkbox.setEnabled(False)
+            self.lsl_debug_checkbox.setChecked(False)
 
         self.max_players_lbl.setText(f"Aktuell max. {self._max_players} Spieler (Hub(s): {hub_count})")
 
@@ -419,6 +434,11 @@ class StartScreen(QWidget):
             self.mapping_right_lbl.setText("")
             return
 
+        if self._lsl_debug_enabled():
+            self.mapping_left_lbl.setText("LSL-Debug aktiv: Alle eingehenden Streams/Kanäle werden automatisch als eigene Karten geplottet.")
+            self.mapping_right_lbl.setText("Spieler-/Hub-Mapping wird in diesem Modus ignoriert.")
+            return
+
         assignments = build_assignments(players, hubs, include_eda=self._include_eda())
         if not assignments:
             self.mapping_left_lbl.setText("Kein Mapping verfügbar.")
@@ -435,14 +455,15 @@ class StartScreen(QWidget):
         self.mapping_left_lbl.setText("\n".join(lines[:4]))
         self.mapping_right_lbl.setText("\n".join(lines[4:8]))
 
-    def get_config(self) -> Tuple[str, str, List[str], List[str], str, bool]:
+    def get_config(self) -> Tuple[str, str, List[str], List[str], str, bool, bool]:
         mode = self.mode_combo.currentText()
         source = "live" if self.live_radio.isChecked() else "mock"
         players = self._effective_players()
         live_backend = "lsl" if self._live_uses_lsl() else "direct"
         hubs = ["LSL"] if live_backend == "lsl" else self._active_hubs()
         include_eda = self._include_eda()
-        return mode, source, players, hubs, live_backend, include_eda
+        lsl_debug = self._lsl_debug_enabled()
+        return mode, source, players, hubs, live_backend, include_eda, lsl_debug
 
 
 class DashboardScreen(QWidget):
@@ -483,6 +504,16 @@ class DashboardScreen(QWidget):
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._tick)
+        self._palette = [
+            "#f7c948",
+            "#ff7f7f",
+            "#8ce99a",
+            "#9ecbff",
+            "#f4a6ff",
+            "#ffd8a8",
+            "#98f5e1",
+            "#ffd43b",
+        ]
 
     def start(
         self,
@@ -492,6 +523,7 @@ class DashboardScreen(QWidget):
         hubs: List[str],
         live_backend: str = "direct",
         include_eda: bool = True,
+        lsl_debug: bool = False,
     ) -> None:
         self.timer.stop()
         self._clear_grid()
@@ -507,7 +539,13 @@ class DashboardScreen(QWidget):
             self.provider = MockProvider(players)
             source_text = "Mock Data"
         else:
-            if live_backend == "lsl":
+            if live_backend == "lsl" and lsl_debug:
+                self.provider = OpenSignalsLSLDebugProvider()
+                backend = self.provider.backend_name if isinstance(self.provider, OpenSignalsLSLDebugProvider) else "unknown"
+                details = self.provider.status if isinstance(self.provider, OpenSignalsLSLDebugProvider) else ""
+                source_text = f"Live Data OpenSignals LSL DEBUG ({backend}) {details}".strip()
+                self.players = []
+            elif live_backend == "lsl":
                 self.provider = OpenSignalsLSLProvider(assignments)
                 backend = self.provider.backend_name if isinstance(self.provider, OpenSignalsLSLProvider) else "unknown"
                 details = self.provider.status if isinstance(self.provider, OpenSignalsLSLProvider) else ""
@@ -518,35 +556,37 @@ class DashboardScreen(QWidget):
                 details = self.provider.status if isinstance(self.provider, LiveHubProvider) else ""
                 source_text = f"Live Data Direct Hub ({backend}) {details}".strip()
 
-        signal_text = "HR + EDA" if include_eda else "HR (ECG only)"
+        signal_text = "LSL Raw Debug" if lsl_debug else ("HR + EDA" if include_eda else "HR (ECG only)")
         self.subtitle.setText(f"{mode} Mode • {signal_text}")
         self.status.setText(f"Data source: {source_text}")
 
         self.buffers = {
             p: PlayerBuffer(deque(maxlen=MAX_POINTS), deque(maxlen=MAX_POINTS), deque(maxlen=MAX_POINTS))
-            for p in players
+            for p in self.players
         }
 
-        colors = [
-            "#f7c948",
-            "#ff7f7f",
-            "#8ce99a",
-            "#9ecbff",
-            "#f4a6ff",
-            "#ffd8a8",
-            "#98f5e1",
-            "#ffd43b",
-        ]
         self.cards = {}
 
-        for i, p in enumerate(players):
-            card = PlayerCard(p, colors[i % len(colors)])
-            card.clicked.connect(self._eliminate_player)
-            self.cards[p] = card
-            r, c = divmod(i, 4)
-            self.grid.addWidget(card, r, c)
+        for p in self.players:
+            self._add_card_for_player(p)
 
         self.timer.start(200)
+
+    def _add_card_for_player(self, player: str) -> None:
+        if player in self.cards:
+            return
+
+        idx = len(self.cards)
+        accent = self._palette[idx % len(self._palette)]
+        card = PlayerCard(player, accent)
+        card.clicked.connect(self._eliminate_player)
+        self.cards[player] = card
+
+        if player not in self.buffers:
+            self.buffers[player] = PlayerBuffer(deque(maxlen=MAX_POINTS), deque(maxlen=MAX_POINTS), deque(maxlen=MAX_POINTS))
+
+        r, c = divmod(idx, 4)
+        self.grid.addWidget(card, r, c)
 
     def _eliminate_player(self, player: str) -> None:
         card = self.cards.get(player)
@@ -571,13 +611,15 @@ class DashboardScreen(QWidget):
         if self.provider is None:
             return
 
-        if isinstance(self.provider, (LiveHubProvider, OpenSignalsLSLProvider)):
+        if isinstance(self.provider, (LiveHubProvider, OpenSignalsLSLProvider, OpenSignalsLSLDebugProvider)):
             self.status.setText(f"Data source: {self.provider.source_name} • {self.provider.status}")
 
         samples = self.provider.get_samples()
 
         for pid, s in samples.items():
-            if pid not in self.buffers or pid in self.hidden_players:
+            if pid not in self.buffers:
+                self._add_card_for_player(pid)
+            if pid in self.hidden_players:
                 continue
             b = self.buffers[pid]
             b.ts.append(s.t)
@@ -719,12 +761,12 @@ class MainWindow(QMainWindow):
         )
 
     def _start_game(self) -> None:
-        mode, source, players, hubs, live_backend, include_eda = self.start_screen.get_config()
-        if not players:
+        mode, source, players, hubs, live_backend, include_eda, lsl_debug = self.start_screen.get_config()
+        if not players and not (source == "live" and live_backend == "lsl" and lsl_debug):
             QMessageBox.warning(self, "Fehlende Spieler", "Bitte mindestens einen Spieler anlegen.")
             return
 
-        self.dashboard.start(mode, source, players, hubs, live_backend, include_eda)
+        self.dashboard.start(mode, source, players, hubs, live_backend, include_eda, lsl_debug)
         self.stack.setCurrentWidget(self.dashboard)
 
     def _back_to_start(self) -> None:

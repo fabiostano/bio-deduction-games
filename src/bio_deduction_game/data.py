@@ -477,6 +477,107 @@ class OpenSignalsLSLProvider(DataProvider):
             self._worker.join(timeout=1.5)
 
 
+class OpenSignalsLSLDebugProvider(DataProvider):
+    """Debug provider: subscribe to LSL and expose every received channel as a series."""
+
+    source_name = "Live Data (OpenSignals LSL Debug)"
+
+    def __init__(self) -> None:
+        self._samples: Dict[str, Sample] = {}
+        self._lock = Lock()
+        self._stop = False
+        self._worker: Optional[Thread] = None
+        self._backend_name = "none"
+        self.status = "idle"
+        self._start_worker()
+
+    @property
+    def backend_name(self) -> str:
+        return self._backend_name
+
+    def _start_worker(self) -> None:
+        self._worker = Thread(target=self._run_worker, daemon=True)
+        self._worker.start()
+
+    def _stream_label(self, stream, idx: int) -> str:
+        parts: List[str] = [f"S{idx + 1}"]
+        for getter in ("name", "type", "source_id"):
+            fn = getattr(stream, getter, None)
+            if callable(fn):
+                try:
+                    v = fn()
+                    if v:
+                        parts.append(str(v))
+                except Exception:
+                    pass
+        return " | ".join(parts)
+
+    def _run_worker(self) -> None:
+        try:
+            import pylsl  # type: ignore
+
+            self._backend_name = "pylsl"
+        except Exception:
+            self._backend_name = "none"
+            self.status = "pylsl not installed"
+            return
+
+        self.status = "searching LSL streams"
+        try:
+            streams = pylsl.resolve_streams(wait_time=2)
+        except Exception:
+            streams = []
+
+        if not streams:
+            self.status = "no LSL streams found"
+            return
+
+        inlets = []
+        for i, s in enumerate(streams):
+            try:
+                inlet = pylsl.StreamInlet(s, max_buflen=10)
+                inlets.append((self._stream_label(s, i), inlet))
+            except Exception:
+                continue
+
+        if not inlets:
+            self.status = "failed to open any LSL inlet"
+            return
+
+        self.status = f"streaming debug: {len(inlets)} inlet(s)"
+
+        while not self._stop:
+            had_data = False
+            for label, inlet in inlets:
+                try:
+                    chunk, ts = inlet.pull_chunk(timeout=0.0, max_samples=64)
+                except Exception:
+                    continue
+
+                if not chunk:
+                    continue
+
+                had_data = True
+                for analog, t in zip(chunk, ts):
+                    now = float(t) if t else time.time()
+                    for ch_idx, value in enumerate(analog):
+                        key = f"{label} • CH{ch_idx + 1}"
+                        with self._lock:
+                            self._samples[key] = Sample(t=now, hr=float(value), eda=0.0)
+
+            if not had_data:
+                time.sleep(0.02)
+
+    def get_samples(self) -> Dict[str, Sample]:
+        with self._lock:
+            return dict(self._samples)
+
+    def close(self) -> None:
+        self._stop = True
+        if self._worker and self._worker.is_alive():
+            self._worker.join(timeout=1.5)
+
+
 def discover_connected_hubs() -> List[str]:
     """Best-effort OpenSignals/BioPlux hub discovery.
 
