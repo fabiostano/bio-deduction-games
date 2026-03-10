@@ -68,9 +68,10 @@ class LiveHubProvider(DataProvider):
 
     source_name = "Live Data"
 
-    def __init__(self, assignments: List[PlayerAssignment], sampling_rate: int = 1000) -> None:
+    def __init__(self, assignments: List[PlayerAssignment], sampling_rate: int = 1000, signal_mode: str = "both") -> None:
         self.assignments = assignments
         self.sampling_rate = sampling_rate
+        self.signal_mode = signal_mode
         self._samples: Dict[str, Sample] = {}
         self._lock = Lock()
 
@@ -146,13 +147,22 @@ class LiveHubProvider(DataProvider):
         def on_frame(analog: List[float]) -> None:
             now = time.time()
             for a in assignments:
-                i_ecg = a.channel_ekg - 1
+                i_ecg = a.channel_ekg - 1 if a.channel_ekg > 0 else None
                 i_eda = a.channel_eda - 1 if a.channel_eda > 0 else None
-                if i_ecg >= len(analog):
+
+                if self.signal_mode == "eda":
+                    if i_eda is None or i_eda >= len(analog):
+                        continue
+                    eda = float(analog[i_eda])
+                    with self._lock:
+                        self._samples[a.player_name] = Sample(t=now, hr=0.0, eda=eda)
+                    continue
+
+                if i_ecg is None or i_ecg >= len(analog):
                     continue
 
                 ecg = float(analog[i_ecg])
-                eda = float(analog[i_eda]) if i_eda is not None and i_eda < len(analog) else 0.0
+                eda = float(analog[i_eda]) if (self.signal_mode == "both" and i_eda is not None and i_eda < len(analog)) else 0.0
                 hr = self._estimate_hr(a.player_name, ecg, now)
 
                 with self._lock:
@@ -239,8 +249,9 @@ class OpenSignalsLSLProvider(DataProvider):
 
     source_name = "Live Data (OpenSignals LSL)"
 
-    def __init__(self, assignments: List[PlayerAssignment]) -> None:
+    def __init__(self, assignments: List[PlayerAssignment], signal_mode: str = "both") -> None:
         self.assignments = assignments
+        self.signal_mode = signal_mode
         self._samples: Dict[str, Sample] = {}
         self._lock = Lock()
 
@@ -430,8 +441,14 @@ class OpenSignalsLSLProvider(DataProvider):
             return
 
         # OpenSignals single-channel LSL is commonly [counter, signal].
-        ecg = float(analog[-1])
-        hr = self._estimate_hr(assignment.player_name, ecg, now)
+        value = float(analog[-1])
+
+        if self.signal_mode == "eda":
+            with self._lock:
+                self._samples[assignment.player_name] = Sample(t=now, hr=0.0, eda=value)
+            return
+
+        hr = self._estimate_hr(assignment.player_name, value, now)
 
         with self._lock:
             self._samples[assignment.player_name] = Sample(t=now, hr=hr, eda=0.0)
@@ -469,14 +486,22 @@ class OpenSignalsLSLProvider(DataProvider):
         offset = self._detect_combined_counter_offset(analog)
 
         for a in self.assignments:
-            i_ecg = (a.channel_ekg - 1) + offset
+            i_ecg = ((a.channel_ekg - 1) + offset) if a.channel_ekg > 0 else None
             i_eda = ((a.channel_eda - 1) + offset) if a.channel_eda > 0 else None
 
-            if i_ecg >= len(analog):
+            if self.signal_mode == "eda":
+                if i_eda is None or i_eda >= len(analog):
+                    continue
+                eda = float(analog[i_eda])
+                with self._lock:
+                    self._samples[a.player_name] = Sample(t=now, hr=0.0, eda=eda)
+                continue
+
+            if i_ecg is None or i_ecg >= len(analog):
                 continue
 
             ecg = float(analog[i_ecg])
-            eda = float(analog[i_eda]) if i_eda is not None and i_eda < len(analog) else 0.0
+            eda = float(analog[i_eda]) if (self.signal_mode == "both" and i_eda is not None and i_eda < len(analog)) else 0.0
             hr = self._estimate_hr(a.player_name, ecg, now)
 
             with self._lock:
@@ -648,7 +673,7 @@ def discover_connected_hubs() -> List[str]:
     return []
 
 
-def build_assignments(players: List[str], hub_macs: List[str], include_eda: bool = True) -> List[PlayerAssignment]:
+def build_assignments(players: List[str], hub_macs: List[str], signal_mode: str = "both") -> List[PlayerAssignment]:
     hubs = [h.strip() for h in hub_macs if h.strip()][:2]
     if not hubs:
         return []
@@ -662,9 +687,12 @@ def build_assignments(players: List[str], hub_macs: List[str], include_eda: bool
         if slot >= 4:
             continue
 
-        if include_eda:
+        if signal_mode == "both":
             ch_ecg = slot * 2 + 1
             ch_eda = slot * 2 + 2
+        elif signal_mode == "eda":
+            ch_ecg = 0
+            ch_eda = slot + 1
         else:
             # ECG-only mode: consume channels sequentially (CH1..CH4 per hub)
             # instead of skipping every second channel.
